@@ -13,6 +13,8 @@ pub struct AppState {
     pub launch_files: Mutex<HashMap<String, Vec<PathBuf>>>,
     /// 마지막으로 파일을 열거나 저장한 폴더(대화상자 시작 위치).
     pub last_directory: Mutex<Option<PathBuf>>,
+    /// 창 라벨 → 그 창이 편집 중인 문서 경로(같은 문서를 두 창에서 열지 않기 위해).
+    pub window_documents: Mutex<HashMap<String, PathBuf>>,
     window_counter: AtomicU32,
 }
 
@@ -22,6 +24,7 @@ impl AppState {
             access: Mutex::new(AccessList::load(data_dir)),
             launch_files: Mutex::new(HashMap::new()),
             last_directory: Mutex::new(None),
+            window_documents: Mutex::new(HashMap::new()),
             window_counter: AtomicU32::new(0),
         }
     }
@@ -50,6 +53,17 @@ impl AppState {
             .entry(label.to_string())
             .or_default()
             .extend(paths);
+    }
+
+    /// 이 문서를 이미 편집 중인 창(자기 자신 제외).
+    pub fn window_for_document(&self, path: &Path, except: Option<&str>) -> Option<String> {
+        let target = crate::access::normalize(path);
+        self.window_documents
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(label, doc)| Some(label.as_str()) != except && crate::access::normalize(doc) == target)
+            .map(|(label, _)| label.clone())
     }
 
     pub fn take_launch_files(&self, label: &str) -> Vec<PathBuf> {
@@ -89,6 +103,16 @@ mod tests {
         let picked = document_args(["--flag", "a.hwp", "missing.hwp", ""], &dir);
         assert_eq!(picked, vec![dir.join("a.hwp")]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn finds_window_editing_a_document() {
+        let state = AppState::new(&std::env::temp_dir().join("rhwpp-state-docs"));
+        let doc = std::env::temp_dir().join("A.hwp");
+        state.window_documents.lock().unwrap().insert("doc-1".into(), doc.clone());
+        assert_eq!(state.window_for_document(&doc, None).as_deref(), Some("doc-1"));
+        assert_eq!(state.window_for_document(&doc, Some("doc-1")), None);
+        assert_eq!(state.window_for_document(&std::env::temp_dir().join("B.hwp"), None), None);
     }
 
     #[test]

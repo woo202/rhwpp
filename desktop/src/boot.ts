@@ -12,8 +12,10 @@ import { installDownloadInterceptor } from './native/downloads';
 import { NativeFileHandle, prefetch } from './native/file-handle';
 import { isTauri, openWindow, takeLaunchFiles } from './native/ipc';
 import { installLaunchQueue, launchQueue } from './native/launch-queue';
+import { markLaunchSettled } from './native/launch-state';
 import { installNativePickers } from './native/pickers';
 import * as studio from './studio';
+import { samePath } from './util';
 import { closeDocument, exitApp, newWindow, registerDesktopCommands } from './ui/commands';
 import { installDocumentTabs } from './ui/doc-tabs';
 import { installDrop } from './ui/drop';
@@ -35,12 +37,42 @@ if (tauri) {
   // 실행 인자/다른 창에서 넘어온 문서. 스튜디오 초기화와 병렬로 미리 읽어 둔다.
   void takeLaunchFiles().then((files) => {
     const [first, ...rest] = files;
-    if (first) {
-      prefetch(first.path);
-      launchQueue.enqueue([new NativeFileHandle(first.path, first.name)]);
-    }
     for (const file of rest) void openWindow([file.path]);
-  }).catch((error) => console.error('[rhwpp] 시작 문서를 받지 못했습니다', error));
+    if (!first) {
+      markLaunchSettled();
+      return;
+    }
+    prefetch(first.path);
+    launchQueue.enqueue([new NativeFileHandle(first.path, first.name)]);
+    waitForDocument(first.path, 10_000).then(markLaunchSettled);
+  }).catch((error) => {
+    console.error('[rhwpp] 시작 문서를 받지 못했습니다', error);
+    markLaunchSettled();
+  });
+
+  // WebView2 기본 오른쪽 단추 메뉴(뒤로·새로 고침·다른 이름으로 저장…)를 막는다. 문서 영역의
+  // 한글식 메뉴는 스튜디오가 따로 띄우고, 입력 칸에서는 잘라내기/붙이기 메뉴를 남긴다.
+  window.addEventListener('contextmenu', (event) => {
+    const target = event.target as Element | null;
+    if (target?.closest?.('input, textarea, [contenteditable="true"]')) return;
+    event.preventDefault();
+  });
+} else {
+  markLaunchSettled();
+}
+
+/** 시작 문서가 이 창에 열릴 때까지(또는 시간 초과·실패) 기다린다. */
+function waitForDocument(path: string, timeoutMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const timer = window.setInterval(() => {
+      const current = studio.filePath();
+      if ((current && samePath(current, path)) || Date.now() - started > timeoutMs) {
+        window.clearInterval(timer);
+        resolve();
+      }
+    }, 50);
+  });
 }
 
 installTitleBar();

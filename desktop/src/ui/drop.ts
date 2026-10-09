@@ -8,8 +8,8 @@
  */
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { isSupportedDocumentFileName } from '@/command/file-system-access';
-import { baseName, openWindow, readFile } from '../native/ipc';
-import { mimeTypeFor } from '../util';
+import { baseName, focusWindowForDocument, openWindow, readFile } from '../native/ipc';
+import { mimeTypeFor, samePath } from '../util';
 import { openInThisWindow } from '../native/launch-queue';
 import * as studio from '../studio';
 import { notify } from './notify';
@@ -42,7 +42,14 @@ async function insertImage(path: string, clientX: number, clientY: number): Prom
 }
 
 export async function openDocuments(paths: string[]): Promise<void> {
-  const docs = paths.filter((p) => isSupportedDocumentFileName(baseName(p)));
+  const candidates = paths.filter((p) => isSupportedDocumentFileName(baseName(p)));
+  const docs: string[] = [];
+  for (const path of candidates) {
+    // 이미 다른 창에서 편집 중이면 그 창으로 전환한다.
+    if (studio.filePath() && samePath(studio.filePath()!, path)) continue;
+    if (await focusWindowForDocument(path).catch(() => null)) continue;
+    docs.push(path);
+  }
   if (docs.length === 0) return;
   let rest = docs;
   if (studio.isPristine()) {

@@ -3,10 +3,12 @@
  *
  * 복구본은 모든 창이 같은 저장소를 쓴다. 스튜디오는 시작할 때 복구본이 있으면 복구를
  * 묻는데, 나중에 연 창이 다른 창에서 편집 중인 문서의 복구본을 묻지 않도록 프로그램을 처음
- * 켤 때 뜨는 첫 창(main)에서만 복구 후보를 보여 준다.
+ * 켤 때 뜨는 첫 창(main)에서만 복구 후보를 보여 준다. 또 시작 문서가 열린 뒤에 답해
+ * 빈 문서가 먼저 만들어졌다 바뀌는 깜빡임을 없앤다.
  */
 export * from '@/recovery/autosave-store';
 import { listAutosaveDrafts as listOriginal, type AutosaveDraft } from '@/recovery/autosave-store';
+import { launchSettled } from '../native/launch-state';
 
 function isStartupWindow(): boolean {
   const internals = (window as unknown as {
@@ -17,6 +19,8 @@ function isStartupWindow(): boolean {
 }
 
 export async function listAutosaveDrafts(): Promise<AutosaveDraft[]> {
+  // 시작 문서가 먼저 열리게 기다린다. 열리면 스튜디오는 복구 질문과 빈 문서 만들기를 건너뛴다.
+  await launchSettled;
   if (!isStartupWindow()) return [];
   return listOriginal();
 }

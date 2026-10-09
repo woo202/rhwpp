@@ -36,9 +36,12 @@ class NativeWritable implements FileSystemWritableFileStreamLike {
     try {
       await writeFile(this.handle.path, bytes);
     } catch (error) {
-      // 스튜디오는 쓰기 실패를 "다른 위치에 저장" 흐름으로 넘긴다. 원인은 여기서 알린다.
-      notify(`저장하지 못했습니다.\n${error instanceof Error ? error.message : String(error)}\n다른 위치를 골라 저장하세요.`, true);
-      throw error;
+      // 스튜디오는 AbortError 가 아닌 오류를 "내려받기로 저장" 흐름으로 넘기고 곧바로 문서를
+      // 저장된 것으로 표시한다. 그러면 창을 닫을 때 편집 내용이 사라질 수 있으므로, 원인을
+      // 알린 뒤 취소(AbortError)로 돌려 문서를 '수정됨' 상태로 남긴다.
+      const reason = error instanceof Error ? error.message : String(error);
+      notify(`저장하지 못했습니다.\n${reason}\n다른 이름으로 저장(Alt+V)으로 다른 위치에 저장하세요.`, true);
+      throw new DOMException(`저장 실패: ${reason}`, 'AbortError');
     }
     this.handle.forgetCachedBytes();
     window.dispatchEvent(new CustomEvent('rhwpp:file-written', { detail: { path: this.handle.path } }));

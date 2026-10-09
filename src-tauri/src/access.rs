@@ -49,9 +49,13 @@ impl AccessList {
     }
 
     /// 실제로 열거나 저장한 문서를 기억한다(다음 실행의 최근 문서 재열기).
+    /// HWP/HWPX/HML 문서만 디스크에 남기고, 그림 등은 이번 실행 동안만 허용한다.
     pub fn remember(&mut self, path: &Path) {
         let path = normalize(path);
         self.granted.insert(path.clone());
+        if !is_document_path(&path) {
+            return;
+        }
         self.known.retain(|known| *known != path);
         self.known.push_front(path);
         self.known.truncate(MAX_KNOWN_DOCUMENTS);
@@ -68,6 +72,14 @@ impl AccessList {
             let _ = fs::write(store, json);
         }
     }
+}
+
+/// 최근 문서로 기억할 만한 문서 형식인가.
+pub fn is_document_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "hwp" | "hwpx" | "hml"))
+        .unwrap_or(false)
 }
 
 /// 비교용 경로 정규화. Windows 경로는 대소문자를 구분하지 않는다.
@@ -111,9 +123,13 @@ mod tests {
 
         let other = dir.join("other.hwpx");
         access.remember(&other);
+        let picture = dir.join("photo.png");
+        access.remember(&picture);
+        assert!(access.is_allowed(&picture));
         let reloaded = AccessList::load(&dir);
         assert!(reloaded.is_allowed(&other));
         assert!(!reloaded.is_allowed(&doc));
+        assert!(!reloaded.is_allowed(&picture), "그림 경로는 디스크에 남기지 않는다");
         let _ = fs::remove_dir_all(&dir);
     }
 }

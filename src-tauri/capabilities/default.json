@@ -36,6 +36,9 @@
     "allow-list-documents",
     "allow-focus-window",
     "allow-request-close-window",
-    "core:event:allow-emit"
+    "core:event:allow-emit",
+    "allow-set-window-document",
+    "allow-focus-window-for-document",
+    "allow-destroy-window"
   ]
 }

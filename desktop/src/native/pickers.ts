@@ -5,7 +5,7 @@
 import type { FilePickerType } from '@/command/save-format';
 import { NativeFileHandle } from './file-handle';
 import { filtersFromTypes } from '../util';
-import { dialogOpen, dialogSave } from './ipc';
+import { dialogOpen, dialogSave, focusWindowForDocument } from './ipc';
 
 export { filtersFromTypes };
 
@@ -32,6 +32,10 @@ export async function showOpenFilePicker(options: OpenPickerOptions = {}): Promi
     title: '불러오기',
   });
   if (picked.length === 0) throw abortError();
+  // 이미 다른 창에서 편집 중인 문서면 그 창으로 전환한다(같은 파일을 두 곳에서 고치지 않게).
+  if (picked.length === 1 && await focusWindowForDocument(picked[0].path).catch(() => null)) {
+    throw abortError();
+  }
   return picked.map((file) => new NativeFileHandle(file.path, file.name));
 }
 

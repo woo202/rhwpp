@@ -85,6 +85,19 @@ export function requestQuit(): Promise<void> {
   return invoke('request_quit');
 }
 
+export function setWindowDocument(path: string | null): Promise<void> {
+  return invoke('set_window_document', { path });
+}
+
+/** 이 문서를 편집 중인 다른 창이 있으면 그 창을 앞으로 가져오고 라벨을 돌려준다. */
+export function focusWindowForDocument(path: string): Promise<string | null> {
+  return invoke('focus_window_for_document', { path });
+}
+
+export function destroyWindow(): Promise<void> {
+  return invoke('destroy_window');
+}
+
 export function appDataDir(): Promise<string> {
   return invoke('app_data_dir');
 }

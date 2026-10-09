@@ -130,11 +130,18 @@ pub async fn dialog_open(
     if let Some(dir) = default_directory(&state) {
         builder = builder.set_directory(dir);
     }
-    let picked = if multiple {
-        builder.blocking_pick_files().unwrap_or_default()
+    // 대화상자가 떠 있는 동안 비동기 작업 스레드를 붙잡지 않도록 콜백 + 채널로 기다린다.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if multiple {
+        builder.pick_files(move |files| {
+            let _ = tx.send(files.unwrap_or_default());
+        });
     } else {
-        builder.blocking_pick_file().into_iter().collect()
-    };
+        builder.pick_file(move |file| {
+            let _ = tx.send(file.into_iter().collect());
+        });
+    }
+    let picked: Vec<tauri_plugin_dialog::FilePath> = rx.await.unwrap_or_default();
     let mut result = Vec::new();
     for file in picked {
         let path = file.into_path().map_err(|e| e.to_string())?;
@@ -166,7 +173,11 @@ pub async fn dialog_save(
     if let Some(dir) = default_directory(&state) {
         builder = builder.set_directory(dir);
     }
-    let Some(file) = builder.blocking_save_file() else {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    builder.save_file(move |file| {
+        let _ = tx.send(file);
+    });
+    let Some(file) = rx.await.ok().flatten() else {
         return Ok(None);
     };
     let mut path = file.into_path().map_err(|e| e.to_string())?;

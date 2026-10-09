@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-focus-window-for-document"
+description = "Enables the focus_window_for_document command without any pre-configured scope."
+commands.allow = ["focus_window_for_document"]
+
+[[permission]]
+identifier = "deny-focus-window-for-document"
+description = "Denies the focus_window_for_document command without any pre-configured scope."
+commands.deny = ["focus_window_for_document"]

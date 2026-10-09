@@ -101,14 +101,34 @@ pub fn create_document_window<R: Runtime>(
             }
             // 인쇄 미리보기(print.html) 같은 같은 출처 팝업. window.open 이 돌려준 창을
             // 스튜디오가 직접 그려 넣으므로 opener 관계를 유지한 Tauri 창으로 만든다.
+            //
+            // 스튜디오는 하이퍼링크도 window.open('about:blank') 뒤 location.replace(url) 로 연다.
+            // 팝업이 외부 주소로 가려 하면 기본 브라우저로 넘기고 빈 팝업은 닫는다.
             let n = POPUP_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let popup_label = format!("popup-{n}");
+            let app_for_popup_nav = app_for_popup.clone();
+            let label_for_nav = popup_label.clone();
             let popup = WebviewWindowBuilder::new(
                 &app_for_popup,
-                format!("popup-{n}"),
+                &popup_label,
                 WebviewUrl::External("about:blank".parse().expect("about:blank")),
             )
             .window_features(features)
-            .title("인쇄 미리보기 - rhwpp")
+            .on_navigation(move |url| {
+                if is_app_url(url) {
+                    return true;
+                }
+                open_externally(&app_for_popup_nav, url);
+                let app = app_for_popup_nav.clone();
+                let label = label_for_nav.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Some(window) = app.get_webview_window(&label) {
+                        let _ = window.destroy();
+                    }
+                });
+                false
+            })
+            .title("rhwpp")
             .inner_size(1000.0, 820.0)
             .center()
             .on_document_title_changed(|window, title| {
@@ -158,17 +178,18 @@ fn geometry_of<R: Runtime>(window: &WebviewWindow<R>) -> Option<Geometry> {
 }
 
 /// `target` 을 `source` 와 같은 자리·크기로 옮긴다(탭 전환처럼 보이게).
+/// 배율이 다른 모니터 사이에서도 맞도록 물리 좌표를 쓴다.
 fn match_geometry<R: Runtime>(source: &WebviewWindow<R>, target: &WebviewWindow<R>) {
-    let Some(geometry) = geometry_of(source) else { return };
-    if geometry.maximized {
-        let _ = target.set_position(tauri::LogicalPosition::new(geometry.x, geometry.y));
+    let (Ok(position), Ok(size)) = (source.outer_position(), source.inner_size()) else { return };
+    if source.is_maximized().unwrap_or(false) {
+        let _ = target.set_position(position);
         let _ = target.maximize();
     } else {
         if target.is_maximized().unwrap_or(false) {
             let _ = target.unmaximize();
         }
-        let _ = target.set_position(tauri::LogicalPosition::new(geometry.x, geometry.y));
-        let _ = target.set_size(tauri::LogicalSize::new(geometry.width, geometry.height));
+        let _ = target.set_position(position);
+        let _ = target.set_size(size);
     }
 }
 
@@ -231,6 +252,46 @@ pub fn request_close_window(app: AppHandle, label: String) -> Result<(), String>
         .map_err(|e| e.to_string())
 }
 
+/// 이 창이 지금 편집 중인 문서 경로를 알린다(새 문서면 null).
+#[tauri::command]
+pub fn set_window_document(window: WebviewWindow, state: State<'_, AppState>, path: Option<String>) {
+    let mut docs = state.window_documents.lock().unwrap();
+    match path {
+        Some(path) => {
+            docs.insert(window.label().to_string(), PathBuf::from(path));
+        }
+        None => {
+            docs.remove(window.label());
+        }
+    }
+}
+
+/// 이 문서를 이미 편집 중인 다른 창이 있으면 그 창을 앞으로 가져오고 라벨을 돌려준다.
+#[tauri::command]
+pub async fn focus_window_for_document(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<Option<String>, String> {
+    let Some(label) = state.window_for_document(std::path::Path::new(&path), Some(window.label())) else {
+        return Ok(None);
+    };
+    let Some(target) = app.get_webview_window(&label) else { return Ok(None) };
+    match_geometry(&window, &target);
+    let _ = target.unminimize();
+    target.set_focus().map_err(|e| e.to_string())?;
+    Ok(Some(label))
+}
+
+/// 저장 확인을 마친 창을 닫는다. 닫기 전에 창 위치·크기·최대화 상태를 저장한다.
+#[tauri::command]
+pub fn destroy_window(app: AppHandle, window: WebviewWindow) -> Result<(), String> {
+    use tauri_plugin_window_state::{AppHandleExt, StateFlags};
+    let _ = app.save_window_state(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED);
+    window.destroy().map_err(|e| e.to_string())
+}
+
 /// 이 창이 시작할 때 열어야 할 문서(실행 인자, 다른 창에서 넘긴 문서).
 #[tauri::command]
 pub fn take_launch_files(window: WebviewWindow, state: State<'_, AppState>) -> Vec<PickedFile> {
@@ -282,11 +343,30 @@ pub fn handle_second_instance<R: Runtime>(app: &AppHandle<R>, argv: Vec<String>,
     let paths = crate::state::document_args(argv.iter().skip(1), std::path::Path::new(&cwd));
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        match create_document_window(&app, paths, None) {
-            Ok(window) => {
-                let _ = window.set_focus();
+        // 이미 열려 있는 문서는 그 창을 앞으로 가져오고, 나머지는 문서마다 새 창으로 연다.
+        // 문서 없이 다시 실행하면 빈 새 창을 하나 연다.
+        let state = app.state::<AppState>();
+        let had_paths = !paths.is_empty();
+        let mut fresh = Vec::new();
+        for path in paths {
+            match state.window_for_document(&path, None).and_then(|l| app.get_webview_window(&l)) {
+                Some(window) => {
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                }
+                None => fresh.push(vec![path]),
             }
-            Err(error) => eprintln!("[rhwpp] 새 창을 만들지 못했습니다: {error}"),
+        }
+        if !had_paths {
+            fresh.push(Vec::new());
+        }
+        for paths in fresh {
+            match create_document_window(&app, paths, None) {
+                Ok(window) => {
+                    let _ = window.set_focus();
+                }
+                Err(error) => eprintln!("[rhwpp] 새 창을 만들지 못했습니다: {error}"),
+            }
         }
     });
 }

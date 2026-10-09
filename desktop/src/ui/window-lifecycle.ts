@@ -2,7 +2,7 @@
  * 창 수명주기: 닫기 전 저장 확인, 프로그램 끝(Alt+X), 창 제목 동기화.
  */
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { isTauri } from '../native/ipc';
+import { destroyWindow, isTauri, setWindowDocument } from '../native/ipc';
 import { documentTitle } from '../util';
 import * as studio from '../studio';
 
@@ -34,7 +34,19 @@ function computeTitle(): DocumentTitle {
   return documentTitle(fileName, studio.filePath(), hasDoc && studio.isDirty(), APP_NAME);
 }
 
+let reportedPath: string | null | undefined;
+
+/** 이 창의 문서 경로를 셸에 알린다(같은 문서를 다른 창에서 열면 이 창으로 전환). */
+function reportDocumentPath(): void {
+  if (!isTauri()) return;
+  const path = studio.filePath();
+  if (path === reportedPath) return;
+  reportedPath = path;
+  void setWindowDocument(path).catch(() => undefined);
+}
+
 function refreshTitle(): void {
+  reportDocumentPath();
   const next = computeTitle();
   if (lastTitle && lastTitle.text === next.text) return;
   lastTitle = next;
@@ -70,7 +82,7 @@ export async function closeThisWindow(): Promise<boolean> {
     }
     if (!await studio.confirmDiscardOrSave()) return false;
     await studio.discardRecoveryDraft();
-    if (isTauri()) await getCurrentWindow().destroy();
+    if (isTauri()) await destroyWindow();
     else window.close();
     return true;
   } finally {

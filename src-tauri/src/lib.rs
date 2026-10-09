@@ -46,7 +46,25 @@ pub fn run() {
                 }
             }
             WindowEvent::Destroyed if windows::is_document_window(window.label()) => {
-                let _ = window.app_handle().emit(windows::WINDOWS_CHANGED_EVENT, ());
+                let app = window.app_handle();
+                app.state::<AppState>()
+                    .window_documents
+                    .lock()
+                    .unwrap()
+                    .remove(window.label());
+                let _ = app.emit(windows::WINDOWS_CHANGED_EVENT, ());
+                // 마지막 문서 창이 닫히면 남은 팝업(인쇄 미리보기)도 닫아 프로세스를 끝낸다.
+                let any_document_left = app
+                    .webview_windows()
+                    .keys()
+                    .any(|label| label != window.label() && windows::is_document_window(label));
+                if !any_document_left {
+                    for (label, popup) in app.webview_windows() {
+                        if label.starts_with("popup-") {
+                            let _ = popup.destroy();
+                        }
+                    }
+                }
             }
             _ => {}
         })
@@ -65,6 +83,9 @@ pub fn run() {
             windows::list_documents,
             windows::focus_window,
             windows::request_close_window,
+            windows::set_window_document,
+            windows::focus_window_for_document,
+            windows::destroy_window,
         ])
         .run(tauri::generate_context!())
         .expect("rhwpp 실행 중 오류가 발생했습니다");

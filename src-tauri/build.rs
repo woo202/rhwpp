@@ -16,6 +16,9 @@ fn main() {
         "list_documents",
         "focus_window",
         "request_close_window",
+        "set_window_document",
+        "focus_window_for_document",
+        "destroy_window",
     ];
     tauri_build::try_build(
         tauri_build::Attributes::new()
