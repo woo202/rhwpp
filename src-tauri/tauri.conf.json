@@ -97,8 +97,7 @@
       },
       "wix": {
         "language": [
-          "ko-KR",
-          "en-US"
+          "ko-KR"
         ]
       }
     }

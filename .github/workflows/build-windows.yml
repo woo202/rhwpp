@@ -55,6 +55,7 @@ jobs:
             upstream/rhwp -> target
             src-tauri -> target
           key: ${{ hashFiles('upstream.json') }}
+          cache-on-failure: true
 
       - name: 문서 엔진 WASM 빌드 (업스트림 rust-toolchain.toml 사용)
         run: npm run build:wasm
