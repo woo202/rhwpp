@@ -13,6 +13,9 @@ fn main() {
         "take_launch_files",
         "open_window",
         "request_quit",
+        "list_documents",
+        "focus_window",
+        "request_close_window",
     ];
     tauri_build::try_build(
         tauri_build::Attributes::new()

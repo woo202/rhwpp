@@ -78,3 +78,10 @@ test('브라우저 예약 키 차단', () => {
   assert.ok(!isBrowserReservedKey(key({ key: 's', ctrlKey: true })), '저장은 스튜디오가 처리');
   assert.ok(!isBrowserReservedKey(key({ key: 'b', ctrlKey: true })), '진하게');
 });
+
+test('문서 탭 이름', async () => {
+  const { tabLabelFromTitle } = await import('../src/util.ts');
+  assert.deepEqual(tabLabelFromTitle('*보고서.hwp [C:\\문서\\] - rhwpp'), { name: '보고서.hwp', dirty: true });
+  assert.deepEqual(tabLabelFromTitle('새 문서.hwp - rhwpp'), { name: '새 문서.hwp', dirty: false });
+  assert.deepEqual(tabLabelFromTitle('rhwpp'), { name: '빈 문서', dirty: false });
+});

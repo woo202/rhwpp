@@ -62,6 +62,12 @@ export async function closeThisWindow(): Promise<boolean> {
   if (closing) return false;
   closing = true;
   try {
+    // 다른 창(문서 탭 ×, 끝)에서 요청받았을 때 저장 확인 대화상자가 가려지지 않게 앞으로 가져온다.
+    if (isTauri() && studio.hasDocument() && studio.isDirty()) {
+      const win = getCurrentWindow();
+      await win.unminimize().catch(() => undefined);
+      await win.setFocus().catch(() => undefined);
+    }
     if (!await studio.confirmDiscardOrSave()) return false;
     await studio.discardRecoveryDraft();
     if (isTauri()) await getCurrentWindow().destroy();

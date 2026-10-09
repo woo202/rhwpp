@@ -17,6 +17,7 @@ import type {
 } from '@/command/file-system-access';
 import { mimeTypeFor, nativeHandleRecord, samePath } from '../util';
 import { baseName, readFile, writeFile } from './ipc';
+import { notify } from '../ui/notify';
 
 export { mimeTypeFor, samePath };
 
@@ -32,7 +33,13 @@ class NativeWritable implements FileSystemWritableFileStreamLike {
   async close(): Promise<void> {
     const bytes = new Uint8Array(await new Blob(this.chunks).arrayBuffer());
     this.chunks.length = 0;
-    await writeFile(this.handle.path, bytes);
+    try {
+      await writeFile(this.handle.path, bytes);
+    } catch (error) {
+      // 스튜디오는 쓰기 실패를 "다른 위치에 저장" 흐름으로 넘긴다. 원인은 여기서 알린다.
+      notify(`저장하지 못했습니다.\n${error instanceof Error ? error.message : String(error)}\n다른 위치를 골라 저장하세요.`, true);
+      throw error;
+    }
     this.handle.forgetCachedBytes();
     window.dispatchEvent(new CustomEvent('rhwpp:file-written', { detail: { path: this.handle.path } }));
   }

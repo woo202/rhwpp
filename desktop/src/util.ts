@@ -135,3 +135,15 @@ export function isBrowserReservedKey(e: KeyLike, dev = false): boolean {
   if (!dev && ctrl && e.shiftKey && (key === 'i' || key === 'j')) return true;
   return false;
 }
+
+/** 창 제목("*문서.hwp [C:\폴더\] - rhwpp")에서 문서 탭 이름을 뽑는다. */
+export function tabLabelFromTitle(title: string, appName = 'rhwpp'): { name: string; dirty: boolean } {
+  let text = title.trim();
+  const suffix = ` - ${appName}`;
+  if (text.endsWith(suffix)) text = text.slice(0, -suffix.length);
+  else if (text === appName) text = '';
+  text = text.replace(/\s\[[^\]]*\]$/, '');
+  const dirty = text.startsWith('*');
+  if (dirty) text = text.slice(1);
+  return { name: text || '빈 문서', dirty };
+}

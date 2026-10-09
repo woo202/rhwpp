@@ -15,6 +15,7 @@ import { installLaunchQueue, launchQueue } from './native/launch-queue';
 import { installNativePickers } from './native/pickers';
 import * as studio from './studio';
 import { closeDocument, exitApp, newWindow, registerDesktopCommands } from './ui/commands';
+import { installDocumentTabs } from './ui/doc-tabs';
 import { installDrop } from './ui/drop';
 import { hangulShortcuts, installKeymap, setDesktopShortcuts } from './ui/keymap';
 import { installRibbon, syncRibbonStates } from './ui/ribbon';
@@ -70,5 +71,6 @@ void studio.whenStudioReady().then(() => {
   if (tauri) {
     installCloseGuard();
     installDrop();
+    installDocumentTabs(newWindow);
   }
 });

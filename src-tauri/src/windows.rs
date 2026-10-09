@@ -13,10 +13,11 @@ use crate::files::PickedFile;
 use crate::state::AppState;
 
 pub const CLOSE_REQUEST_EVENT: &str = "rhwpp://close-request";
+/// 문서 창이 생기거나 닫히거나 제목이 바뀌면 모든 창에 알린다(문서 탭 갱신).
+pub const WINDOWS_CHANGED_EVENT: &str = "rhwpp://windows-changed";
 
 const DEFAULT_WIDTH: f64 = 1280.0;
 const DEFAULT_HEIGHT: f64 = 860.0;
-const CASCADE_OFFSET: i32 = 32;
 
 static POPUP_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -44,20 +45,26 @@ fn open_externally<R: Runtime>(app: &AppHandle<R>, url: &Url) {
 }
 
 /// 문서 창을 만든다. `paths` 는 창이 준비되면 열 문서들이다.
+///
+/// 한글의 문서 탭처럼 보이도록 새 창은 기준 창(`like`, 없으면 지금 활성 창)과 같은 자리·크기로
+/// 겹쳐 연다. 하단 문서 탭으로 창 사이를 오간다.
 pub fn create_document_window<R: Runtime>(
     app: &AppHandle<R>,
     paths: Vec<PathBuf>,
+    like: Option<&WebviewWindow<R>>,
 ) -> tauri::Result<WebviewWindow<R>> {
     let state = app.state::<AppState>();
     let label = state.next_window_label();
     state.queue_launch_files(&label, paths);
 
-    let cascade_from = app
-        .webview_windows()
-        .values()
-        .find(|w| w.is_focused().unwrap_or(false))
-        .cloned()
-        .or_else(|| app.webview_windows().values().next().cloned());
+    let reference = like.cloned().or_else(|| {
+        let windows = app.webview_windows();
+        windows
+            .values()
+            .find(|w| is_document_window(w.label()) && w.is_focused().unwrap_or(false))
+            .cloned()
+            .or_else(|| windows.values().find(|w| is_document_window(w.label())).cloned())
+    });
 
     let app_for_popup = app.clone();
     let app_for_nav = app.clone();
@@ -114,22 +121,114 @@ pub fn create_document_window<R: Runtime>(
             }
         });
 
-    if let Some(prev) = cascade_from {
-        if let (Ok(pos), Ok(false)) = (prev.outer_position(), prev.is_maximized()) {
-            let scale = prev.scale_factor().unwrap_or(1.0);
-            let pos = pos.to_logical::<f64>(scale);
-            builder = builder.position(
-                pos.x + f64::from(CASCADE_OFFSET),
-                pos.y + f64::from(CASCADE_OFFSET),
-            );
-        } else {
-            builder = builder.center();
+    match reference.as_ref().and_then(|w| geometry_of(w)) {
+        Some(geometry) => {
+            builder = builder
+                .position(geometry.x, geometry.y)
+                .inner_size(geometry.width, geometry.height)
+                .maximized(geometry.maximized);
         }
-    } else {
-        builder = builder.center();
+        None => builder = builder.center(),
     }
 
-    builder.build()
+    let window = builder.build()?;
+    let _ = app.emit(WINDOWS_CHANGED_EVENT, ());
+    Ok(window)
+}
+
+struct Geometry {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    maximized: bool,
+}
+
+fn geometry_of<R: Runtime>(window: &WebviewWindow<R>) -> Option<Geometry> {
+    let scale = window.scale_factor().ok()?;
+    let position = window.outer_position().ok()?.to_logical::<f64>(scale);
+    let size = window.inner_size().ok()?.to_logical::<f64>(scale);
+    Some(Geometry {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+        maximized: window.is_maximized().unwrap_or(false),
+    })
+}
+
+/// `target` 을 `source` 와 같은 자리·크기로 옮긴다(탭 전환처럼 보이게).
+fn match_geometry<R: Runtime>(source: &WebviewWindow<R>, target: &WebviewWindow<R>) {
+    let Some(geometry) = geometry_of(source) else { return };
+    if geometry.maximized {
+        let _ = target.set_position(tauri::LogicalPosition::new(geometry.x, geometry.y));
+        let _ = target.maximize();
+    } else {
+        if target.is_maximized().unwrap_or(false) {
+            let _ = target.unmaximize();
+        }
+        let _ = target.set_position(tauri::LogicalPosition::new(geometry.x, geometry.y));
+        let _ = target.set_size(tauri::LogicalSize::new(geometry.width, geometry.height));
+    }
+}
+
+pub fn is_document_window(label: &str) -> bool {
+    label == "main" || label.starts_with("doc-")
+}
+
+fn window_order(label: &str) -> u32 {
+    label.strip_prefix("doc-").and_then(|n| n.parse().ok()).unwrap_or(0)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DocumentWindow {
+    pub label: String,
+    pub title: String,
+    pub focused: bool,
+}
+
+/// 열린 문서 창 목록(문서 탭). 창을 연 순서대로.
+#[tauri::command]
+pub fn list_documents(app: AppHandle) -> Vec<DocumentWindow> {
+    let mut windows: Vec<DocumentWindow> = app
+        .webview_windows()
+        .into_iter()
+        .filter(|(label, _)| is_document_window(label))
+        .map(|(label, window)| DocumentWindow {
+            title: window.title().unwrap_or_default(),
+            focused: window.is_focused().unwrap_or(false),
+            label,
+        })
+        .collect();
+    windows.sort_by_key(|w| window_order(&w.label));
+    windows
+}
+
+/// 문서 탭을 눌렀을 때: 그 창을 앞으로 가져온다.
+#[tauri::command]
+pub fn focus_window(app: AppHandle, caller: WebviewWindow, label: String) -> Result<(), String> {
+    let window = app
+        .get_webview_window(&label)
+        .filter(|_| is_document_window(&label))
+        .ok_or_else(|| format!("창을 찾을 수 없습니다: {label}"))?;
+    if window.is_minimized().unwrap_or(false) {
+        window.unminimize().map_err(|e| e.to_string())?;
+    }
+    if caller.label() != window.label() {
+        match_geometry(&caller, &window);
+    }
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())
+}
+
+/// 문서 탭의 × : 그 창에 닫기 요청(저장 확인은 그 창이 한다).
+#[tauri::command]
+pub fn request_close_window(app: AppHandle, label: String) -> Result<(), String> {
+    if !is_document_window(&label) {
+        return Err(format!("문서 창이 아닙니다: {label}"));
+    }
+    app.emit_to(label.as_str(), CLOSE_REQUEST_EVENT, ())
+        .map_err(|e| e.to_string())
 }
 
 /// 이 창이 시작할 때 열어야 할 문서(실행 인자, 다른 창에서 넘긴 문서).
@@ -144,7 +243,12 @@ pub fn take_launch_files(window: WebviewWindow, state: State<'_, AppState>) -> V
 
 /// 새 창. `paths` 가 있으면 그 문서들을 연다(이미 접근이 허용된 경로만).
 #[tauri::command]
-pub fn open_window(app: AppHandle, state: State<'_, AppState>, paths: Vec<String>) -> Result<String, String> {
+pub fn open_window(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+) -> Result<String, String> {
     let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
     {
         let access = state.access.lock().unwrap();
@@ -152,8 +256,8 @@ pub fn open_window(app: AppHandle, state: State<'_, AppState>, paths: Vec<String
             return Err(format!("허용되지 않은 경로입니다: {}", denied.display()));
         }
     }
-    let window = create_document_window(&app, paths).map_err(|e| e.to_string())?;
-    Ok(window.label().to_string())
+    let created = create_document_window(&app, paths, Some(&window)).map_err(|e| e.to_string())?;
+    Ok(created.label().to_string())
 }
 
 /// 프로그램 끝(Alt+X): 모든 문서 창에 닫기 요청을 보낸다. 각 창은 저장 확인 후 스스로 닫힌다.
@@ -171,7 +275,7 @@ pub fn request_quit(app: AppHandle) {
 /// 다른 인스턴스로 실행됐을 때(탐색기에서 문서를 다시 연 경우 등).
 pub fn handle_second_instance<R: Runtime>(app: &AppHandle<R>, argv: Vec<String>, cwd: String) {
     let paths = crate::state::document_args(argv.iter().skip(1), std::path::Path::new(&cwd));
-    match create_document_window(app, paths) {
+    match create_document_window(app, paths, None) {
         Ok(window) => {
             let _ = window.set_focus();
         }
@@ -182,6 +286,16 @@ pub fn handle_second_instance<R: Runtime>(app: &AppHandle<R>, argv: Vec<String>,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn orders_document_windows() {
+        assert!(is_document_window("main"));
+        assert!(is_document_window("doc-3"));
+        assert!(!is_document_window("popup-0"));
+        let mut labels = vec!["doc-10", "main", "doc-2"];
+        labels.sort_by_key(|l| window_order(l));
+        assert_eq!(labels, vec!["main", "doc-2", "doc-10"]);
+    }
 
     #[test]
     fn classifies_app_urls() {

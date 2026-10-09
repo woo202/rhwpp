@@ -8,7 +8,7 @@ mod files;
 mod state;
 mod windows;
 
-use tauri::{DragDropEvent, Manager, WindowEvent};
+use tauri::{DragDropEvent, Emitter, Manager, WindowEvent};
 use tauri_plugin_window_state::StateFlags;
 
 use crate::state::AppState;
@@ -24,8 +24,8 @@ pub fn run() {
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED)
-                // 인쇄 미리보기 같은 임시 팝업은 위치를 기억하지 않는다.
-                .with_filter(|label| !label.starts_with("popup-"))
+                // 첫 창의 위치·크기만 기억한다. 나중 창은 문서 탭처럼 기준 창에 겹쳐 열린다.
+                .with_filter(|label| label == "main")
                 .build(),
         )
         .setup(|app| {
@@ -33,18 +33,22 @@ pub fn run() {
             app.manage(AppState::new(&data_dir));
             let cwd = std::env::current_dir().unwrap_or_default();
             let paths = state::document_args(std::env::args_os().skip(1), &cwd);
-            windows::create_document_window(app.handle(), paths)?;
+            windows::create_document_window(app.handle(), paths, None)?;
             Ok(())
         })
-        .on_window_event(|window, event| {
+        .on_window_event(|window, event| match event {
             // 끌어다 놓은 파일은 이번 실행 동안 읽기를 허용한다.
-            if let WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) = event {
+            WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) => {
                 let state = window.state::<AppState>();
                 let mut access = state.access.lock().unwrap();
                 for path in paths {
                     access.grant(path);
                 }
             }
+            WindowEvent::Destroyed if windows::is_document_window(window.label()) => {
+                let _ = window.app_handle().emit(windows::WINDOWS_CHANGED_EVENT, ());
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             files::dialog_open,
@@ -58,6 +62,9 @@ pub fn run() {
             windows::take_launch_files,
             windows::open_window,
             windows::request_quit,
+            windows::list_documents,
+            windows::focus_window,
+            windows::request_close_window,
         ])
         .run(tauri::generate_context!())
         .expect("rhwpp 실행 중 오류가 발생했습니다");
