@@ -189,7 +189,7 @@ pub struct DocumentWindow {
 
 /// 열린 문서 창 목록(문서 탭). 창을 연 순서대로.
 #[tauri::command]
-pub fn list_documents(app: AppHandle) -> Vec<DocumentWindow> {
+pub async fn list_documents(app: AppHandle) -> Vec<DocumentWindow> {
     let mut windows: Vec<DocumentWindow> = app
         .webview_windows()
         .into_iter()
@@ -206,7 +206,7 @@ pub fn list_documents(app: AppHandle) -> Vec<DocumentWindow> {
 
 /// 문서 탭을 눌렀을 때: 그 창을 앞으로 가져온다.
 #[tauri::command]
-pub fn focus_window(app: AppHandle, caller: WebviewWindow, label: String) -> Result<(), String> {
+pub async fn focus_window(app: AppHandle, caller: WebviewWindow, label: String) -> Result<(), String> {
     let window = app
         .get_webview_window(&label)
         .filter(|_| is_document_window(&label))
@@ -242,8 +242,10 @@ pub fn take_launch_files(window: WebviewWindow, state: State<'_, AppState>) -> V
 }
 
 /// 새 창. `paths` 가 있으면 그 문서들을 연다(이미 접근이 허용된 경로만).
+///
+/// Windows(WebView2)에서는 동기 명령 안에서 창을 만들면 교착되므로 비동기 명령이어야 한다.
 #[tauri::command]
-pub fn open_window(
+pub async fn open_window(
     app: AppHandle,
     window: WebviewWindow,
     state: State<'_, AppState>,
@@ -273,14 +275,20 @@ pub fn request_quit(app: AppHandle) {
 }
 
 /// 다른 인스턴스로 실행됐을 때(탐색기에서 문서를 다시 연 경우 등).
+///
+/// 단일 인스턴스 콜백은 창 메시지 처리 중에 불리므로, 그 자리에서 창을 만들면 WebView2 가
+/// 교착된다. 비동기 작업으로 넘겨 만든다.
 pub fn handle_second_instance<R: Runtime>(app: &AppHandle<R>, argv: Vec<String>, cwd: String) {
     let paths = crate::state::document_args(argv.iter().skip(1), std::path::Path::new(&cwd));
-    match create_document_window(app, paths, None) {
-        Ok(window) => {
-            let _ = window.set_focus();
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        match create_document_window(&app, paths, None) {
+            Ok(window) => {
+                let _ = window.set_focus();
+            }
+            Err(error) => eprintln!("[rhwpp] 새 창을 만들지 못했습니다: {error}"),
         }
-        Err(error) => eprintln!("[rhwpp] 새 창을 만들지 못했습니다: {error}"),
-    }
+    });
 }
 
 #[cfg(test)]
