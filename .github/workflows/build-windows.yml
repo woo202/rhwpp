@@ -59,6 +59,9 @@ jobs:
       - name: 문서 엔진 WASM 빌드 (업스트림 rust-toolchain.toml 사용)
         run: npm run build:wasm
 
+      - name: 프런트엔드 빌드 (업스트림 스튜디오 의존성 설치 포함)
+        run: npm run build:web
+
       - name: 타입 검사
         run: npm run typecheck
 
