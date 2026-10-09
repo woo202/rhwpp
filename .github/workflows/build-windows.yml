@@ -71,6 +71,32 @@ jobs:
       - name: 설치 파일 빌드 (NSIS + MSI)
         run: npx tauri build
 
+      - name: 실행 확인 (문서를 연 채로 20초 동작 + 화면 캡처)
+        shell: pwsh
+        run: |
+          $doc = Resolve-Path upstream/rhwp/saved/blank2010.hwp
+          $p = Start-Process -FilePath src-tauri/target/release/rhwpp.exe -ArgumentList "`"$doc`"" -PassThru
+          Start-Sleep -Seconds 20
+          if ($p.HasExited) { throw "rhwpp.exe 가 시작 직후 종료되었습니다 (exit $($p.ExitCode))" }
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+          $bmp.Save("$PWD/smoke-screenshot.png")
+          $title = (Get-Process -Id $p.Id).MainWindowTitle
+          Write-Host "창 제목: $title"
+          Stop-Process -Id $p.Id -Force
+          if (-not $title.Contains('blank2010.hwp')) { throw "문서가 열리지 않았습니다 (창 제목: $title)" }
+
+      - name: 스모크 테스트 화면 올리기
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-screenshot
+          path: smoke-screenshot.png
+          if-no-files-found: ignore
+
       - name: 휴대용 실행 파일 묶기
         shell: pwsh
         run: |
