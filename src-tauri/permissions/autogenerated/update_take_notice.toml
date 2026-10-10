@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-update-take-notice"
+description = "Enables the update_take_notice command without any pre-configured scope."
+commands.allow = ["update_take_notice"]
+
+[[permission]]
+identifier = "deny-update-take-notice"
+description = "Denies the update_take_notice command without any pre-configured scope."
+commands.deny = ["update_take_notice"]
