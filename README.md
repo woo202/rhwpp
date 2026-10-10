@@ -53,36 +53,45 @@
 ### 명령어 한 줄로 설치 (권장)
 
 설치할 PC에서 PowerShell을 열고(시작 단추 → `PowerShell` 입력) 아래 한 줄을 붙여 넣습니다.
-관리자 권한은 필요 없습니다.
+새로 설치할 때는 관리자 권한이 필요 없습니다.
 
 ```powershell
-irm https://github.com/woo202/rhwpp/releases/latest/download/install.ps1 | iex
+[Net.ServicePointManager]::SecurityProtocol = 'Tls12'; irm https://github.com/woo202/rhwpp/releases/latest/download/install.ps1 | iex
 ```
 
+- 앞부분(`SecurityProtocol = 'Tls12'`)은 TLS 1.0이 기본값으로 남아 있는 오래된 Windows 10에서도 GitHub에
+  접속되게 합니다.
 - 최신 릴리스의 설치 파일을 받아 릴리스의 `SHA256SUMS.txt`와 SHA-256 값을 맞춰 본 뒤, 현재 사용자용으로
-  조용히 설치합니다(`%LOCALAPPDATA%\rhwpp`). 시작 메뉴·바탕 화면 바로 가기와 `.hwp`·`.hwpx`·`.hml`
+  조용히 설치합니다(`%LOCALAPPDATA%\Programs\rhwpp`). 시작 메뉴·바탕 화면 바로 가기와 `.hwp`·`.hwpx`·`.hml`
   파일 연결도 만듭니다.
-- 같은 명령을 다시 실행하면 새 버전으로 업데이트합니다. 이미 최신이면 아무것도 하지 않습니다.
-- rhwpp가 열려 있으면 저장하고 닫을 때까지 기다립니다.
-- 명령 프롬프트(cmd)나 실행 창(Win+R)에서는 다음처럼 씁니다.
+- 같은 명령을 다시 실행하면 새 버전으로 업데이트합니다. 이미 최신이거나 더 새 버전이 깔려 있으면 아무것도
+  하지 않고, 업데이트할 때는 지운 바로 가기를 다시 만들지 않습니다.
+- 이미 모든 사용자용(`Program Files`)으로 깔려 있으면 그 설치를 업데이트하므로 관리자 확인 창이 뜹니다.
+- 바꿀 rhwpp가 열려 있으면 문서를 저장하고 닫을 때까지 기다립니다.
+- MSI로 설치한 rhwpp가 있으면 설치하지 않고 멈춥니다. `-Uninstall`로 먼저 지우세요.
+- 명령 프롬프트(cmd)나 실행 창(Win+R)에서는 다음 한 줄을 씁니다. 결과를 읽을 수 있게 창이 열린 채로
+  남으니, 다 읽었으면 닫으면 됩니다.
 
   ```bat
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/woo202/rhwpp/releases/latest/download/install.ps1 | iex"
+  powershell -NoExit -NoProfile -Command "[Net.ServicePointManager]::SecurityProtocol='Tls12'; irm https://github.com/woo202/rhwpp/releases/latest/download/install.ps1 | iex"
   ```
 
 옵션을 주려면 스크립트 블록으로 실행합니다. 예: 모든 사용자용 설치
 
 ```powershell
-& ([scriptblock]::Create((irm https://github.com/woo202/rhwpp/releases/latest/download/install.ps1))) -AllUsers
+[Net.ServicePointManager]::SecurityProtocol = 'Tls12'; & ([scriptblock]::Create((irm https://github.com/woo202/rhwpp/releases/latest/download/install.ps1))) -AllUsers
 ```
 
 | 옵션 | 뜻 |
 | --- | --- |
-| `-AllUsers` | 이 PC의 모든 사용자용으로 `Program Files`에 설치합니다(관리자 권한 확인 창이 뜹니다). |
-| `-Version 0.1.0` | 최신 대신 지정한 릴리스를 설치합니다. |
+| `-AllUsers` | 이 PC의 모든 사용자용으로 `Program Files`에 설치합니다(관리자 확인 창이 뜹니다). 현재 사용자용 설치가 있으면 먼저 지워서 하나만 남깁니다. |
+| `-Version 0.1.0` | 최신 대신 지정한 릴리스를 설치합니다(낮은 버전으로 되돌릴 때도 씁니다). |
 | `-Launch` | 설치가 끝나면 rhwpp를 실행합니다. |
-| `-Force` | 같은 버전도 다시 설치하고, 실행 중인 rhwpp를 묻지 않고 닫습니다(저장하지 않은 내용은 사라집니다). |
-| `-Uninstall` | rhwpp를 제거합니다. 문서와 설정은 남깁니다. |
+| `-Force` | 같은 버전이나 더 새 버전이 깔려 있어도 다시 설치하고, 실행 중인 rhwpp를 묻지 않고 닫습니다(저장하지 않은 내용은 사라집니다). |
+| `-Uninstall` | rhwpp를 제거합니다(MSI로 설치한 것 포함). 문서와 설정은 남깁니다. |
+
+관리자 권한으로 연 PowerShell에서 실행하면 그 관리자 계정에 설치됩니다. 다른 계정에 설치하려면 그 계정으로
+로그인해 일반 PowerShell 창에서 실행합니다.
 
 ### 직접 받아 설치
 

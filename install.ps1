@@ -5,20 +5,24 @@
 .DESCRIPTION
     Open PowerShell and run:
 
-        irm https://github.com/woo202/rhwpp/releases/latest/download/install.ps1 | iex
+        [Net.ServicePointManager]::SecurityProtocol = 'Tls12'; irm https://github.com/woo202/rhwpp/releases/latest/download/install.ps1 | iex
 
+    (The first statement lets older Windows PowerShell 5.1 setups reach GitHub at all.)
     To pass options, run it as a script block:
 
         & ([scriptblock]::Create((irm https://github.com/woo202/rhwpp/releases/latest/download/install.ps1))) -AllUsers
 
     The script downloads the installer from the GitHub release, checks it against the
-    release's SHA256SUMS.txt and runs it silently. No administrator rights are needed
-    unless -AllUsers is given. Running it again updates rhwpp to the latest release.
+    release's SHA256SUMS.txt and runs it silently. A new install goes to
+    %LOCALAPPDATA%\Programs\rhwpp and needs no administrator rights; -AllUsers, or
+    updating an existing all-users install, asks for them. Running it again updates
+    rhwpp to the latest release.
 
     This file is kept ASCII-only: `irm` may decode it without a charset.
 
 .PARAMETER AllUsers
     Install for every user of this PC into Program Files (asks for administrator rights).
+    An existing per-user install is removed first so only one copy remains.
 
 .PARAMETER Version
     Install this release (for example 0.1.0) instead of the latest one.
@@ -27,11 +31,12 @@
     Start rhwpp when the installation finishes.
 
 .PARAMETER Force
-    Reinstall even if the same version is already installed, and let the installer close
-    a running rhwpp without asking (unsaved changes are lost).
+    Reinstall even if the same or a newer version is installed, and let the installer
+    close a running rhwpp without asking (unsaved changes are lost).
 
 .PARAMETER Uninstall
-    Remove rhwpp. Documents and settings are kept.
+    Remove rhwpp, including a copy installed from the MSI package. Documents and
+    settings are kept.
 
 .PARAMETER ReleaseUrl
     Download from this directory instead of the GitHub release (a mirror, or a local
@@ -47,7 +52,7 @@ param(
 )
 
 # Run in a child scope so `irm | iex` does not leave helper functions or preference
-# changes behind in the user's session.
+# changes behind in the user's session (the parameters above do become variables there).
 & {
     $ErrorActionPreference = 'Stop'
     # Windows PowerShell 5.1 downloads very slowly while drawing a progress bar.
@@ -56,7 +61,8 @@ param(
     $Repo = 'https://github.com/woo202/rhwpp'
     $AppName = 'rhwpp'
     $ExeName = 'rhwpp.exe'
-    $UninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\rhwpp'
+    $UninstallRoot = 'Software\Microsoft\Windows\CurrentVersion\Uninstall'
+    $UninstallKey = "$UninstallRoot\rhwpp"
     $SetupPattern = '^rhwpp_([0-9A-Za-z.+-]+)_x64-setup\.exe$'
 
     function Write-Step([string]$Message) {
@@ -92,6 +98,16 @@ param(
         } catch { }
     }
 
+    # True when this PowerShell runs with an elevated (administrator) token.
+    function Test-Elevated {
+        try {
+            $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+            return ([Security.Principal.WindowsPrincipal]$identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        } catch {
+            return $false
+        }
+    }
+
     function Get-StatusCode($ErrorRecord) {
         $response = $null
         try { $response = $ErrorRecord.Exception.Response } catch { }
@@ -124,6 +140,27 @@ param(
         return $map
     }
 
+    # Splits x.y.z[-pre] into a comparable list, or returns $null.
+    function Get-VersionKey([string]$Text) {
+        if ($Text -notmatch '^\s*v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?') { return $null }
+        return @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3], [string]$Matches[4])
+    }
+
+    # True only when both versions parse and $Installed is newer than $Target.
+    function Test-NewerVersion([string]$Installed, [string]$Target) {
+        $a = Get-VersionKey $Installed
+        $b = Get-VersionKey $Target
+        if ($null -eq $a -or $null -eq $b) { return $false }
+        for ($i = 0; $i -lt 3; $i++) {
+            if ($a[$i] -ne $b[$i]) { return ($a[$i] -gt $b[$i]) }
+        }
+        if ($a[3] -eq $b[3]) { return $false }
+        if (-not $a[3]) { return $true }    # 1.0.0 is newer than 1.0.0-beta
+        if (-not $b[3]) { return $false }
+        return ([string]::CompareOrdinal($a[3], $b[3]) -gt 0)
+    }
+
+    # Installs made by the NSIS installer (this script, or setup.exe run by hand).
     function Get-InstalledApp {
         $views = @(
             @{ Scope = 'CurrentUser'; Hive = [Microsoft.Win32.RegistryHive]::CurrentUser; View = [Microsoft.Win32.RegistryView]::Default },
@@ -157,15 +194,68 @@ param(
         return $found
     }
 
+    # Installs made from the MSI package, which registers under its product code.
+    function Get-MsiInstall {
+        $found = @()
+        foreach ($view in @([Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryView]::Registry32)) {
+            $base = $null
+            $root = $null
+            try {
+                $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
+                $root = $base.OpenSubKey($UninstallRoot)
+                if (-not $root) { continue }
+                foreach ($name in $root.GetSubKeyNames()) {
+                    if ($name -notmatch '^\{[0-9A-Fa-f-]{36}\}$') { continue }
+                    $key = $root.OpenSubKey($name)
+                    if (-not $key) { continue }
+                    try {
+                        $isApp = ([string]$key.GetValue('DisplayName') -eq $AppName) -and
+                            ([string]$key.GetValue('Publisher') -eq $AppName) -and
+                            ([string]$key.GetValue('UninstallString') -match 'msiexec')
+                        if ($isApp -and -not ($found | Where-Object { $_.ProductCode -eq $name })) {
+                            $found += [pscustomobject]@{
+                                ProductCode = $name
+                                Version     = [string]$key.GetValue('DisplayVersion')
+                                Location    = ([string]$key.GetValue('InstallLocation')).Trim().Trim('"')
+                            }
+                        }
+                    } finally {
+                        $key.Close()
+                    }
+                }
+            } finally {
+                if ($root) { $root.Close() }
+                if ($base) { $base.Close() }
+            }
+        }
+        return $found
+    }
+
+    # rhwpp processes in this logon session that run from one of the given install folders.
+    # The installer only closes the copy it replaces, so other copies do not matter.
+    function Get-RunningApp([string[]]$Locations) {
+        $exes = @($Locations | Where-Object { $_ } | ForEach-Object { Join-Path $_ $ExeName })
+        if ($exes.Count -eq 0) { return @() }
+        $session = [Diagnostics.Process]::GetCurrentProcess().SessionId
+        return @(Get-Process -Name $AppName -ErrorAction SilentlyContinue | Where-Object {
+            $path = $null
+            try { $path = $_.Path } catch { }
+            ($_.SessionId -eq $session) -and $path -and ($exes -contains $path)
+        })
+    }
+
     # The installer closes a running rhwpp by force, so give the user a chance to save first.
-    function Wait-AppClosed {
+    function Wait-AppClosed([string[]]$Locations) {
         while ($true) {
-            $running = @(Get-Process -Name $AppName -ErrorAction SilentlyContinue)
+            $running = @(Get-RunningApp $Locations)
             if ($running.Count -eq 0 -or $Force) { return }
             Write-Host "$AppName is running. Save your documents and close every $AppName window." -ForegroundColor Yellow
+            $answer = $null
             try {
                 $answer = Read-Host "Press Enter when done, type F to close $AppName now (unsaved changes are lost), or Q to cancel"
-            } catch {
+            } catch { }
+            # Read-Host throws in a non-interactive host and returns $null when input is redirected.
+            if ($null -eq $answer) {
                 throw "$AppName is running. Close it and try again, or add -Force to close it without saving."
             }
             if ($answer -match '^\s*q') { throw 'Cancelled.' }
@@ -173,7 +263,7 @@ param(
         }
     }
 
-    # Runs an NSIS installer or uninstaller and returns its exit code.
+    # Runs an installer or uninstaller and returns its exit code.
     function Invoke-Setup([string]$Path, [string[]]$Arguments, [bool]$Elevate) {
         $savedCompat = $env:__COMPAT_LAYER
         $start = @{ FilePath = $Path; ArgumentList = $Arguments; Wait = $true; PassThru = $true }
@@ -204,9 +294,41 @@ param(
         }
     }
 
+    function Remove-Installation($Item) {
+        if (-not (Test-Path -LiteralPath $Item.Uninstaller)) {
+            throw "The uninstaller is missing: $($Item.Uninstaller). Remove $AppName from Settings > Apps."
+        }
+        Write-Step "Removing $AppName $($Item.Version) from $($Item.Location)..."
+        $code = Invoke-Setup $Item.Uninstaller @('/S') ($Item.Scope -eq 'AllUsers')
+        Assert-SetupExitCode $code 'uninstallation'
+        # An NSIS uninstaller copies itself to %TEMP% and exits at once; the copy does
+        # the work. Wait until it has removed the registration.
+        $deadline = (Get-Date).AddMinutes(2)
+        while (@(Get-InstalledApp | Where-Object { $_.Uninstaller -eq $Item.Uninstaller }).Count -gt 0) {
+            if ((Get-Date) -gt $deadline) { throw "The uninstaller did not finish. Remove $AppName from Settings > Apps." }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+
+    function Remove-MsiInstallation($Item) {
+        Write-Step "Removing $AppName $($Item.Version) installed from the MSI package (administrator permission needed)..."
+        $msiexec = Join-Path $env:SystemRoot 'System32\msiexec.exe'
+        $code = Invoke-Setup $msiexec @('/x', $Item.ProductCode, '/qn', '/norestart') $true
+        # 3010: removed, restart required. 1605: already gone.
+        if ($code -eq 0 -or $code -eq 3010 -or $code -eq 1605) { return }
+        if ($code -eq 1602) { throw 'The uninstallation was cancelled.' }
+        throw "Removing the MSI package failed (msiexec exit code $code)."
+    }
+
     function Start-App([string]$Location) {
         $exe = Join-Path $Location $ExeName
-        if (Test-Path -LiteralPath $exe) { Start-Process -FilePath $exe }
+        if (-not (Test-Path -LiteralPath $exe)) { return }
+        if (Test-Elevated) {
+            # Do not run a document editor as administrator: let Explorer start it normally.
+            Start-Process -FilePath (Join-Path $env:SystemRoot 'explorer.exe') -ArgumentList ('"' + $exe + '"')
+        } else {
+            Start-Process -FilePath $exe
+        }
     }
 
     function Install-App {
@@ -214,6 +336,11 @@ param(
         if ($requested.StartsWith('v')) { $requested = $requested.Substring(1) }
         if ($requested -and $requested -notmatch '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$') {
             throw "'$Version' is not a version number like 0.1.0."
+        }
+
+        $msi = @(Get-MsiInstall)
+        if ($msi.Count -gt 0) {
+            throw "$AppName $($msi[0].Version) is installed from the MSI package. Remove it first (run this command with -Uninstall, or use Settings > Apps), then run this command again."
         }
 
         if ($ReleaseUrl) {
@@ -265,13 +392,28 @@ param(
                 $scope = 'AllUsers'
             }
             $existing = @($installed | Where-Object { $_.Scope -eq $scope }) | Select-Object -First 1
-            if ($existing -and $existing.Version -eq $target -and -not $Force) {
-                Write-Host "$AppName $target is already installed in $($existing.Location). Add -Force to reinstall." -ForegroundColor Green
-                if ($Launch) { Start-App $existing.Location }
-                return
+            if ($existing -and -not $Force) {
+                if ($existing.Version -eq $target) {
+                    Write-Host "$AppName $target is already installed in $($existing.Location). Add -Force to reinstall." -ForegroundColor Green
+                    if ($Launch) { Start-App $existing.Location }
+                    return
+                }
+                if (-not $requested -and (Test-NewerVersion $existing.Version $target)) {
+                    Write-Host "$AppName $($existing.Version) is newer than the latest release ($target); nothing to do. Add -Version $target -Force to go back to it." -ForegroundColor Green
+                    if ($Launch) { Start-App $existing.Location }
+                    return
+                }
+            }
+            # Moving to an all-users install: remove the per-user copy so only one remains.
+            $replaceUser = ($scope -eq 'AllUsers' -and $user.Count -gt 0)
+            if ($scope -eq 'CurrentUser' -and (Test-Elevated)) {
+                Write-Host "PowerShell is running as administrator, so $AppName is installed for the account '$env:USERNAME' only. To install it for another account, run the command in a normal PowerShell window signed in as that account." -ForegroundColor Yellow
             }
 
-            Wait-AppClosed
+            $closeFirst = @()
+            if ($existing) { $closeFirst += $existing.Location }
+            if ($replaceUser) { $closeFirst += $user[0].Location }
+            Wait-AppClosed $closeFirst
 
             # Download the installer from the same release as the checksums.
             if ($ReleaseUrl) {
@@ -293,6 +435,12 @@ param(
                 throw "The downloaded installer is damaged or was altered (SHA-256 $actual, expected $($sums[$setupName])). Nothing was installed."
             }
 
+            if ($replaceUser) {
+                Write-Host "Removing the per-user installation first so only the all-users copy remains."
+                Remove-Installation $user[0]
+                $existing = $null
+            }
+
             if ($scope -eq 'AllUsers') {
                 Write-Step 'Installing for all users (administrator permission needed)...'
                 $arguments = @('/S', '/AllUsers')
@@ -300,6 +448,8 @@ param(
                 Write-Step 'Installing for the current user...'
                 $arguments = @('/S', '/CurrentUser')
             }
+            # An update keeps the shortcuts the user removed; a new install or -Force creates them.
+            if ($existing -and -not $Force) { $arguments += '/UPDATE' }
             $code = Invoke-Setup $setupFile $arguments ($scope -eq 'AllUsers')
             Assert-SetupExitCode $code 'installation'
 
@@ -319,26 +469,14 @@ param(
 
     function Uninstall-App {
         $installed = @(Get-InstalledApp)
-        if ($installed.Count -eq 0) {
+        $msi = @(Get-MsiInstall)
+        if ($installed.Count -eq 0 -and $msi.Count -eq 0) {
             Write-Host "$AppName is not installed." -ForegroundColor Green
             return
         }
-        Wait-AppClosed
-        foreach ($item in $installed) {
-            if (-not (Test-Path -LiteralPath $item.Uninstaller)) {
-                throw "The uninstaller is missing: $($item.Uninstaller). Remove $AppName from Settings > Apps."
-            }
-            Write-Step "Removing $AppName $($item.Version) ($($item.Location))..."
-            $code = Invoke-Setup $item.Uninstaller @('/S') ($item.Scope -eq 'AllUsers')
-            Assert-SetupExitCode $code 'uninstallation'
-            # An NSIS uninstaller copies itself to %TEMP% and exits at once; the copy does
-            # the work. Wait until it has removed the registration.
-            $deadline = (Get-Date).AddMinutes(2)
-            while (@(Get-InstalledApp | Where-Object { $_.Uninstaller -eq $item.Uninstaller }).Count -gt 0) {
-                if ((Get-Date) -gt $deadline) { throw "The uninstaller did not finish. Remove $AppName from Settings > Apps." }
-                Start-Sleep -Milliseconds 500
-            }
-        }
+        Wait-AppClosed @(@($installed) + @($msi) | ForEach-Object { $_.Location })
+        foreach ($item in $installed) { Remove-Installation $item }
+        foreach ($item in $msi) { Remove-MsiInstallation $item }
         Write-Host ''
         Write-Host "$AppName has been removed. Your documents and settings were kept." -ForegroundColor Green
     }
@@ -348,9 +486,16 @@ param(
         Initialize-Network
         if ($Uninstall) { Uninstall-App } else { Install-App }
     } catch {
-        Write-Host ''
-        Write-Host "$AppName setup failed: $($_.Exception.Message)" -ForegroundColor Red
-        # Exit with an error code when run as a file; never close the window of `irm | iex`.
-        if ($PSCommandPath) { exit 1 }
+        $message = "$AppName setup failed: $($_.Exception.Message)"
+        if ($PSCommandPath) {
+            # Run as a file: print the reason and exit with an error code.
+            Write-Host ''
+            Write-Host $message -ForegroundColor Red
+            exit 1
+        }
+        # Under `irm | iex` (or a script block) never call exit, which would close the
+        # window. A terminating error keeps it open and still tells a calling script, or
+        # `powershell -Command`, that the installation failed.
+        throw $message
     }
 }

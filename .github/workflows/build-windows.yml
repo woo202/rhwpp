@@ -109,7 +109,7 @@ jobs:
           path: smoke-screenshot.png
           if-no-files-found: ignore
 
-      - name: 한 줄 설치 스크립트 확인 (실제 설치 파일로 설치·재실행·제거)
+      - name: 한 줄 설치 스크립트 확인 (실제 설치 파일로 설치·업데이트·이전·제거)
         shell: pwsh
         run: |
           $rel = Join-Path $env:RUNNER_TEMP 'release'
@@ -118,30 +118,66 @@ jobs:
           Get-ChildItem $rel -File | ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name } |
             Set-Content (Join-Path $rel 'SHA256SUMS.txt') -Encoding ascii
           $server = Start-Process python -ArgumentList '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', $rel -PassThru -WindowStyle Hidden
+          $userKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\rhwpp'
+          $machineKey = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\rhwpp'
+          function Get-InstalledExe([string]$Key) {
+            if (-not (Test-Path $Key)) { return $null }
+            Join-Path ((Get-ItemProperty $Key).InstallLocation.Trim('"')) 'rhwpp.exe'
+          }
+          function Get-MsiEntry {
+            Get-ChildItem 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall' |
+              Get-ItemProperty -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'rhwpp' -and $_.UninstallString -match 'msiexec' }
+          }
           try {
             Start-Sleep -Seconds 3
             $url = 'http://127.0.0.1:8765'
-            $exe = Join-Path $env:LOCALAPPDATA 'rhwpp\rhwpp.exe'
 
-            # 1. Windows PowerShell 5.1 (다른 PC 기본값)로 새로 설치
+            # 1. Windows PowerShell 5.1 (다른 PC 기본값)로 새로 설치: 현재 사용자용
             powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -ReleaseUrl $url
             if ($LASTEXITCODE -ne 0) { throw "설치 실패 (exit $LASTEXITCODE)" }
-            if (-not (Test-Path $exe)) { throw "$exe 가 없습니다" }
+            $userExe = Get-InstalledExe $userKey
+            if (-not $userExe -or -not (Test-Path $userExe)) { throw "현재 사용자 설치를 찾지 못했습니다 ($userExe)" }
+            Write-Host "현재 사용자 설치: $userExe"
 
-            # 2. README 와 같은 irm 경로(5.1), 같은 버전이면 건너뛰는지
+            # 2. README 와 같은 irm 경로(5.1). 같은 버전이면 건너뛴다
             $out = powershell -NoProfile -Command "& ([scriptblock]::Create((irm $url/install.ps1))) -ReleaseUrl $url" | Out-String
             Write-Host $out
-            if ($out -notmatch 'is already installed') { throw 'irm 으로 받은 스크립트가 기존 설치를 알아보지 못했습니다' }
+            if ($LASTEXITCODE -ne 0 -or $out -notmatch 'is already installed') { throw 'irm 으로 받은 스크립트가 기존 설치를 알아보지 못했습니다' }
 
             # 3. PowerShell 7 로 다시 설치
             pwsh -NoProfile -File install.ps1 -ReleaseUrl $url -Force
             if ($LASTEXITCODE -ne 0) { throw "재설치 실패 (exit $LASTEXITCODE)" }
 
-            # 4. 제거
+            # 4. -AllUsers: 현재 사용자 설치를 지우고 모든 사용자용으로 옮긴다
+            powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -ReleaseUrl $url -AllUsers
+            if ($LASTEXITCODE -ne 0) { throw "모든 사용자용 설치 실패 (exit $LASTEXITCODE)" }
+            if (Test-Path $userKey) { throw '현재 사용자 설치가 남아 있습니다' }
+            if (Test-Path $userExe) { throw "$userExe 가 남아 있습니다" }
+            $machineExe = Get-InstalledExe $machineKey
+            if (-not $machineExe -or -not (Test-Path $machineExe)) { throw "모든 사용자용 설치를 찾지 못했습니다 ($machineExe)" }
+            Write-Host "모든 사용자용 설치: $machineExe"
+
+            # 5. 다시 실행하면 모든 사용자용 설치를 알아본다
+            $out = powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -ReleaseUrl $url | Out-String
+            Write-Host $out
+            if ($out -notmatch 'is already installed') { throw '모든 사용자용 설치를 알아보지 못했습니다' }
+
+            # 6. 제거
             powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Uninstall
             if ($LASTEXITCODE -ne 0) { throw "제거 실패 (exit $LASTEXITCODE)" }
-            if (Test-Path $exe) { throw "제거 뒤에도 $exe 가 남아 있습니다" }
-            if (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\rhwpp') { throw '제거 뒤에도 등록 정보가 남아 있습니다' }
+            if ((Test-Path $machineKey) -or (Test-Path $machineExe)) { throw '제거 뒤에도 모든 사용자용 설치가 남아 있습니다' }
+
+            # 7. MSI 로 설치돼 있으면 한 줄 설치는 멈추고, -Uninstall 은 MSI 도 지운다
+            $msi = (Get-ChildItem src-tauri/target/release/bundle/msi/*.msi | Select-Object -First 1).FullName
+            $p = Start-Process msiexec.exe -ArgumentList '/i', "`"$msi`"", '/qn', '/norestart' -Wait -PassThru
+            if ($p.ExitCode -ne 0) { throw "MSI 설치 실패 (exit $($p.ExitCode))" }
+            if (-not (Get-MsiEntry)) { throw 'MSI 설치 정보를 찾지 못했습니다' }
+            $out = powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -ReleaseUrl $url | Out-String
+            Write-Host $out
+            if ($LASTEXITCODE -eq 0 -or $out -notmatch 'MSI package') { throw 'MSI 설치를 알아보지 못했습니다' }
+            powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Uninstall
+            if ($LASTEXITCODE -ne 0) { throw "MSI 제거 실패 (exit $LASTEXITCODE)" }
+            if (Get-MsiEntry) { throw 'MSI 설치가 남아 있습니다' }
           } finally {
             Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
           }
