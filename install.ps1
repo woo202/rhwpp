@@ -10,7 +10,7 @@
     (The first statement lets older Windows PowerShell 5.1 setups reach GitHub at all.)
     To pass options, run it as a script block:
 
-        & ([scriptblock]::Create((irm https://github.com/woo202/rhwpp/releases/latest/download/install.ps1))) -AllUsers
+        [Net.ServicePointManager]::SecurityProtocol = 'Tls12'; & ([scriptblock]::Create((irm https://github.com/woo202/rhwpp/releases/latest/download/install.ps1))) -AllUsers
 
     The script downloads the installer from the GitHub release, checks it against the
     release's SHA256SUMS.txt and runs it silently. A new install goes to
@@ -22,7 +22,7 @@
 
 .PARAMETER AllUsers
     Install for every user of this PC into Program Files (asks for administrator rights).
-    An existing per-user install is removed first so only one copy remains.
+    An existing per-user install is removed afterwards so only one copy remains.
 
 .PARAMETER Version
     Install this release (for example 0.1.0) instead of the latest one.
@@ -142,8 +142,32 @@ param(
 
     # Splits x.y.z[-pre] into a comparable list, or returns $null.
     function Get-VersionKey([string]$Text) {
-        if ($Text -notmatch '^\s*v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?') { return $null }
+        if ($Text -notmatch '^\s*v?(\d{1,9})\.(\d{1,9})\.(\d{1,9})(?:-([0-9A-Za-z.-]+))?') { return $null }
         return @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3], [string]$Matches[4])
+    }
+
+    # Compares two pre-release tags by the semver rules: dot-separated identifiers, numeric
+    # ones by value and below alphanumeric ones, a longer list above its prefix.
+    function Compare-PreRelease([string]$A, [string]$B) {
+        $x = $A.Split('.')
+        $y = $B.Split('.')
+        for ($i = 0; $i -lt [Math]::Min($x.Count, $y.Count); $i++) {
+            $xNumeric = $x[$i] -match '^\d+$'
+            $yNumeric = $y[$i] -match '^\d+$'
+            if ($xNumeric -and $yNumeric) {
+                # Numeric identifiers have no leading zeros, so length decides first.
+                $c = $x[$i].Length.CompareTo($y[$i].Length)
+                if ($c -eq 0) { $c = [Math]::Sign([string]::CompareOrdinal($x[$i], $y[$i])) }
+            } elseif ($xNumeric) {
+                $c = -1
+            } elseif ($yNumeric) {
+                $c = 1
+            } else {
+                $c = [Math]::Sign([string]::CompareOrdinal($x[$i], $y[$i]))
+            }
+            if ($c -ne 0) { return $c }
+        }
+        return $x.Count.CompareTo($y.Count)
     }
 
     # True only when both versions parse and $Installed is newer than $Target.
@@ -157,7 +181,7 @@ param(
         if ($a[3] -eq $b[3]) { return $false }
         if (-not $a[3]) { return $true }    # 1.0.0 is newer than 1.0.0-beta
         if (-not $b[3]) { return $false }
-        return ([string]::CompareOrdinal($a[3], $b[3]) -gt 0)
+        return ((Compare-PreRelease $a[3] $b[3]) -gt 0)
     }
 
     # Installs made by the NSIS installer (this script, or setup.exe run by hand).
@@ -232,7 +256,8 @@ param(
     }
 
     # rhwpp processes in this logon session that run from one of the given install folders.
-    # The installer only closes the copy it replaces, so other copies do not matter.
+    # The installer only closes the copy it replaces, so other copies do not matter. A path
+    # that cannot be read (32-bit PowerShell, elevated rhwpp) counts as a match to be safe.
     function Get-RunningApp([string[]]$Locations) {
         $exes = @($Locations | Where-Object { $_ } | ForEach-Object { Join-Path $_ $ExeName })
         if ($exes.Count -eq 0) { return @() }
@@ -240,7 +265,7 @@ param(
         return @(Get-Process -Name $AppName -ErrorAction SilentlyContinue | Where-Object {
             $path = $null
             try { $path = $_.Path } catch { }
-            ($_.SessionId -eq $session) -and $path -and ($exes -contains $path)
+            ($_.SessionId -eq $session) -and ((-not $path) -or ($exes -contains $path))
         })
     }
 
@@ -307,6 +332,41 @@ param(
         while (@(Get-InstalledApp | Where-Object { $_.Uninstaller -eq $Item.Uninstaller }).Count -gt 0) {
             if ((Get-Date) -gt $deadline) { throw "The uninstaller did not finish. Remove $AppName from Settings > Apps." }
             Start-Sleep -Milliseconds 500
+        }
+        if ($Item.Scope -eq 'CurrentUser') { Clear-UserFileTypes }
+    }
+
+    function Remove-UserCopy($Item) {
+        Write-Host "Removing the per-user installation so only the all-users copy remains."
+        Remove-Installation $Item
+    }
+
+    # The NSIS uninstaller puts back the file type .hwp/.hwpx/.hml had before it was
+    # installed: an empty string when there was none, or rhwpp's own (now deleted) type
+    # after an update or reinstall. Either per-user value hides the association of an
+    # all-users install (rhwpp's or another HWP program's), so remove such leftovers.
+    function Clear-UserFileTypes {
+        foreach ($ext in @('hwp', 'hwpx', 'hml')) {
+            $path = "Software\Classes\.$ext"
+            $empty = $false
+            $key = $null
+            try {
+                $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($path, $true)
+                if (-not $key) { continue }
+                $key.DeleteValue("rhwpp.${ext}_backup", $false)
+                $default = $key.GetValue('')
+                if ($null -ne $default -and ([string]$default -eq '' -or [string]$default -eq "rhwpp.$ext")) {
+                    $key.DeleteValue('', $false)
+                }
+                $empty = ($key.ValueCount -eq 0 -and $key.SubKeyCount -eq 0)
+            } catch {
+                continue
+            } finally {
+                if ($key) { $key.Close() }
+            }
+            if ($empty) {
+                try { [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKey($path, $false) } catch { }
+            }
         }
     }
 
@@ -391,21 +451,27 @@ param(
                 Write-Host "$AppName is installed for all users; updating that installation (administrator permission needed)."
                 $scope = 'AllUsers'
             }
+            # Moving to an all-users install: the per-user copy is removed once the
+            # all-users copy is in place, so only one remains.
+            $replaceUser = ($scope -eq 'AllUsers' -and $user.Count -gt 0)
             $existing = @($installed | Where-Object { $_.Scope -eq $scope }) | Select-Object -First 1
             if ($existing -and -not $Force) {
+                $skip = $null
                 if ($existing.Version -eq $target) {
-                    Write-Host "$AppName $target is already installed in $($existing.Location). Add -Force to reinstall." -ForegroundColor Green
-                    if ($Launch) { Start-App $existing.Location }
-                    return
+                    $skip = "$AppName $target is already installed in $($existing.Location). Add -Force to reinstall."
+                } elseif (-not $requested -and (Test-NewerVersion $existing.Version $target)) {
+                    $skip = "$AppName $($existing.Version) is newer than the latest release ($target); nothing to do. Add -Version $target -Force to go back to it."
                 }
-                if (-not $requested -and (Test-NewerVersion $existing.Version $target)) {
-                    Write-Host "$AppName $($existing.Version) is newer than the latest release ($target); nothing to do. Add -Version $target -Force to go back to it." -ForegroundColor Green
+                if ($skip) {
+                    Write-Host $skip -ForegroundColor Green
+                    if ($replaceUser) {
+                        Wait-AppClosed @($user[0].Location)
+                        Remove-UserCopy $user[0]
+                    }
                     if ($Launch) { Start-App $existing.Location }
                     return
                 }
             }
-            # Moving to an all-users install: remove the per-user copy so only one remains.
-            $replaceUser = ($scope -eq 'AllUsers' -and $user.Count -gt 0)
             if ($scope -eq 'CurrentUser' -and (Test-Elevated)) {
                 Write-Host "PowerShell is running as administrator, so $AppName is installed for the account '$env:USERNAME' only. To install it for another account, run the command in a normal PowerShell window signed in as that account." -ForegroundColor Yellow
             }
@@ -435,12 +501,6 @@ param(
                 throw "The downloaded installer is damaged or was altered (SHA-256 $actual, expected $($sums[$setupName])). Nothing was installed."
             }
 
-            if ($replaceUser) {
-                Write-Host "Removing the per-user installation first so only the all-users copy remains."
-                Remove-Installation $user[0]
-                $existing = $null
-            }
-
             if ($scope -eq 'AllUsers') {
                 Write-Step 'Installing for all users (administrator permission needed)...'
                 $arguments = @('/S', '/AllUsers')
@@ -457,6 +517,8 @@ param(
             if (-not $result -or $result.Version -ne $target -or -not (Test-Path -LiteralPath (Join-Path $result.Location $ExeName))) {
                 throw "The installer finished, but $AppName $target was not found afterwards."
             }
+            # Only now that the all-users copy works (a refused UAC prompt stops earlier).
+            if ($replaceUser) { Remove-UserCopy $user[0] }
 
             Write-Host ''
             Write-Host "$AppName $target is installed in $($result.Location)." -ForegroundColor Green

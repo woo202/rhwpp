@@ -109,7 +109,7 @@ jobs:
           path: smoke-screenshot.png
           if-no-files-found: ignore
 
-      - name: 한 줄 설치 스크립트 확인 (실제 설치 파일로 설치·업데이트·이전·제거)
+      - name: 한 줄 설치 스크립트 확인 (실제 설치 파일로 설치·업데이트·이전·제거·MSI)
         shell: pwsh
         run: |
           $rel = Join-Path $env:RUNNER_TEMP 'release'
@@ -144,9 +144,20 @@ jobs:
             Write-Host $out
             if ($LASTEXITCODE -ne 0 -or $out -notmatch 'is already installed') { throw 'irm 으로 받은 스크립트가 기존 설치를 알아보지 못했습니다' }
 
-            # 3. PowerShell 7 로 다시 설치
+            # 3. PowerShell 7 로 다시 설치(-Force: 바로 가기도 다시 만든다)
             pwsh -NoProfile -File install.ps1 -ReleaseUrl $url -Force
             if ($LASTEXITCODE -ne 0) { throw "재설치 실패 (exit $LASTEXITCODE)" }
+            $shortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'rhwpp.lnk'
+            if (-not (Test-Path $shortcut)) { throw "바탕 화면 바로 가기가 없습니다 ($shortcut)" }
+
+            # 3-1. 업데이트(/UPDATE): 예전 버전으로 보이게 한 뒤 다시 실행. 지운 바로 가기는 되살리지 않는다
+            Remove-Item $shortcut
+            Set-ItemProperty $userKey -Name DisplayVersion -Value '0.0.1'
+            powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -ReleaseUrl $url
+            if ($LASTEXITCODE -ne 0) { throw "업데이트 실패 (exit $LASTEXITCODE)" }
+            $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+            if ((Get-ItemProperty $userKey).DisplayVersion -ne $version) { throw '업데이트 뒤 버전이 바뀌지 않았습니다' }
+            if (Test-Path $shortcut) { throw '업데이트가 지운 바탕 화면 바로 가기를 되살렸습니다' }
 
             # 4. -AllUsers: 현재 사용자 설치를 지우고 모든 사용자용으로 옮긴다
             powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -ReleaseUrl $url -AllUsers
@@ -156,6 +167,13 @@ jobs:
             $machineExe = Get-InstalledExe $machineKey
             if (-not $machineExe -or -not (Test-Path $machineExe)) { throw "모든 사용자용 설치를 찾지 못했습니다 ($machineExe)" }
             Write-Host "모든 사용자용 설치: $machineExe"
+            # 현재 사용자 제거가 남긴 빈 파일 형식 값이 모든 사용자용 연결을 가리지 않아야 한다
+            foreach ($ext in 'hwp', 'hwpx', 'hml') {
+              $progId = (Get-ItemProperty "Registry::HKEY_CLASSES_ROOT\.$ext").'(default)'
+              if ($progId -ne "rhwpp.$ext") { throw ".$ext 파일 연결이 '$progId' 입니다 (rhwpp.$ext 이어야 함)" }
+              $left = (Get-ItemProperty "HKCU:\Software\Classes\.$ext" -ErrorAction SilentlyContinue).'(default)'
+              if ($null -ne $left) { throw "현재 사용자 .$ext 파일 형식 값 '$left' 이 남아 있습니다" }
+            }
 
             # 5. 다시 실행하면 모든 사용자용 설치를 알아본다
             $out = powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -ReleaseUrl $url | Out-String
