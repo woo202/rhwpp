@@ -22,6 +22,7 @@ import { installDrop } from './ui/drop';
 import { hangulShortcuts, installKeymap, setDesktopShortcuts } from './ui/keymap';
 import { installRibbon, syncRibbonStates } from './ui/ribbon';
 import { installTitleBar } from './ui/titlebar';
+import { installUpdateNotices } from './ui/update';
 import { installCloseGuard, installTitleSync } from './ui/window-lifecycle';
 
 const tauri = isTauri();
@@ -127,5 +128,6 @@ void studio.whenStudioReady().then(() => {
     installCloseGuard();
     installDrop();
     installDocumentTabs(newWindow);
+    installUpdateNotices();
   }
 });

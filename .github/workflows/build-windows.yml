@@ -213,6 +213,65 @@ jobs:
             Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
           }
 
+      - name: 자동 업데이트 확인 (설치된 앱이 새 버전을 받아 두었다가 끝낼 때 설치)
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1).FullName
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $userKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\rhwpp'
+          function New-Release([string]$Dir, [string]$Name) {
+            New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+            Copy-Item $setup (Join-Path $Dir $Name)
+            Copy-Item install.ps1 $Dir
+            Get-ChildItem $Dir -File | Where-Object Name -ne 'SHA256SUMS.txt' |
+              ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name } |
+              Set-Content (Join-Path $Dir 'SHA256SUMS.txt') -Encoding ascii
+          }
+          # 지금 버전과, 같은 설치 파일을 '다음 버전(99.0.0)' 이름으로 내놓은 가짜 릴리스
+          $now = Join-Path $env:RUNNER_TEMP 'release-now'
+          $next = Join-Path $env:RUNNER_TEMP 'release-next'
+          New-Release $now (Split-Path -Leaf $setup)
+          New-Release $next 'rhwpp_99.0.0_x64-setup.exe'
+          $servers = @(
+            Start-Process python -ArgumentList '-m', 'http.server', '8767', '--bind', '127.0.0.1', '--directory', $now -PassThru -WindowStyle Hidden
+            Start-Process python -ArgumentList '-m', 'http.server', '8768', '--bind', '127.0.0.1', '--directory', $next -PassThru -WindowStyle Hidden
+          )
+          try {
+            Start-Sleep -Seconds 3
+            powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -ReleaseUrl http://127.0.0.1:8767
+            if ($LASTEXITCODE -ne 0) { throw "설치 실패 (exit $LASTEXITCODE)" }
+            $exe = Join-Path ((Get-ItemProperty $userKey).InstallLocation.Trim('"')) 'rhwpp.exe'
+            # 설치 파일이 다시 실행됐는지 알 수 있게 표시해 둔다(업데이트가 0.1.0 으로 되돌려 쓴다)
+            Set-ItemProperty $userKey -Name DisplayVersion -Value '0.0.1'
+
+            $env:RHWPP_UPDATE_URL = 'http://127.0.0.1:8768'
+            $env:RHWPP_UPDATE_DELAY_SECS = '2'
+            $app = Start-Process $exe -PassThru
+            Remove-Item Env:RHWPP_UPDATE_URL, Env:RHWPP_UPDATE_DELAY_SECS
+
+            $downloaded = Join-Path $env:LOCALAPPDATA 'io.github.woo202.rhwpp\updates\rhwpp_99.0.0_x64-setup.exe'
+            for ($i = 0; $i -lt 90 -and -not (Test-Path $downloaded); $i++) { Start-Sleep -Seconds 1 }
+            if (-not (Test-Path $downloaded)) { throw "앱이 새 버전을 받지 않았습니다 ($downloaded)" }
+            if ((Get-FileHash $downloaded -Algorithm SHA256).Hash -ne (Get-FileHash $setup -Algorithm SHA256).Hash) { throw '받은 설치 파일이 다릅니다' }
+            Write-Host "새 버전을 받는 데 약 ${i}초"
+            Start-Sleep -Seconds 2
+
+            # 창을 닫아 정상 종료 → 끝날 때 설치
+            $null = $app.CloseMainWindow()
+            if (-not $app.WaitForExit(30000)) { throw 'rhwpp 가 창을 닫아도 끝나지 않았습니다' }
+            for ($i = 0; $i -lt 120 -and (Get-ItemProperty $userKey).DisplayVersion -ne $version; $i++) { Start-Sleep -Seconds 1 }
+            if ((Get-ItemProperty $userKey).DisplayVersion -ne $version) { throw '끝낼 때 업데이트가 설치되지 않았습니다' }
+            Write-Host "끝낸 뒤 설치까지 약 ${i}초"
+            Start-Sleep -Seconds 5
+            if (Get-Process rhwpp -ErrorAction SilentlyContinue) { throw '끝낼 때 설치한 뒤에는 다시 실행되면 안 됩니다' }
+
+            powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Uninstall
+            if ($LASTEXITCODE -ne 0) { throw "제거 실패 (exit $LASTEXITCODE)" }
+          } finally {
+            Get-Process rhwpp -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            $servers | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+          }
+
       - name: 휴대용 실행 파일 묶기
         shell: pwsh
         run: |

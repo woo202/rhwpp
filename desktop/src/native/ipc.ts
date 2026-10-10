@@ -102,4 +102,43 @@ export function appDataDir(): Promise<string> {
   return invoke('app_data_dir');
 }
 
+// ── 자동 업데이트(src-tauri/src/updater.rs) ──
+
+export type UpdateState = 'unknown' | 'upToDate' | 'available' | 'ready' | 'error';
+export type InstallKind = 'currentUser' | 'allUsers' | 'portable';
+
+export interface UpdateStatus {
+  current: string;
+  latest: string | null;
+  state: UpdateState;
+  kind: InstallKind;
+  auto: boolean;
+  /** 프로그램을 끝내면 저절로 설치되는가. */
+  installsOnExit: boolean;
+  error: string | null;
+  releasesUrl: string;
+}
+
+export function updateStatus(): Promise<UpdateStatus> {
+  return invoke('update_status');
+}
+
+export function updateCheck(): Promise<UpdateStatus> {
+  return invoke('update_check');
+}
+
+/** 아직 알리지 않은 새 버전이 있으면 한 번만 돌려준다. */
+export function updateTakeNotice(): Promise<UpdateStatus | null> {
+  return invoke('update_take_notice');
+}
+
+export function updateSetAuto(enabled: boolean): Promise<UpdateStatus> {
+  return invoke('update_set_auto', { enabled });
+}
+
+/** 창을 모두 닫고(저장 확인 포함) 업데이트를 설치한 뒤 다시 실행한다. */
+export function updateInstallNow(): Promise<void> {
+  return invoke('update_install_now');
+}
+
 export { baseName, dirName } from '../util';

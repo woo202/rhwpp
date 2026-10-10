@@ -6,10 +6,11 @@ import type { CommandRegistry } from '@/command/registry';
 import type { CommandDispatcher } from '@/command/dispatcher';
 import { CommandPalette } from '@/ui/command-palette';
 import { ModalDialog } from '@/ui/dialog';
-import { isTauri, openWindow, requestQuit, revealInFolder, appDataDir } from '../native/ipc';
+import { isTauri, openWindow, requestQuit, revealInFolder, appDataDir, updateStatus } from '../native/ipc';
 import * as studio from '../studio';
 import { notify } from './notify';
 import { closeThisWindow } from './window-lifecycle';
+import { checkForUpdates, toggleAutoUpdate } from './update';
 
 
 export function newWindow(): void {
@@ -51,7 +52,7 @@ function openCommandPalette(): void {
 }
 
 class DesktopAboutDialog extends ModalDialog {
-  constructor(private readonly dataDir: string) {
+  constructor(private readonly dataDir: string, private readonly autoUpdate: string) {
     super('rhwpp 정보', 460);
   }
 
@@ -64,6 +65,7 @@ class DesktopAboutDialog extends ModalDialog {
       ['프로그램', `rhwpp ${__RHWPP_VERSION__}`],
       ['문서 엔진', `rhwp ${__RHWPP_UPSTREAM_VERSION__} (${__RHWPP_UPSTREAM_COMMIT__.slice(0, 12)})`],
       ['웹 엔진', `Microsoft Edge WebView2 ${webview}`],
+      ['자동 업데이트', this.autoUpdate],
       ['설정 폴더', this.dataDir || '-'],
     ];
     body.innerHTML = `
@@ -82,7 +84,11 @@ class DesktopAboutDialog extends ModalDialog {
 
 async function showDesktopAbout(): Promise<void> {
   const dir = isTauri() ? await appDataDir().catch(() => '') : '';
-  new DesktopAboutDialog(dir).show();
+  const status = isTauri() ? await updateStatus().catch(() => null) : null;
+  const autoUpdate = !status ? '-'
+    : status.kind === 'portable' ? '설치된 프로그램이 아니어서 쓰지 않음'
+      : status.auto ? '켜짐' : '꺼짐';
+  new DesktopAboutDialog(dir, autoUpdate).show();
 }
 
 export function registerDesktopCommands(): void {
@@ -100,6 +106,18 @@ export function registerDesktopCommands(): void {
     },
     { id: 'ext:rhwpp.command-palette', label: '명령 찾기', shortcutLabel: 'Ctrl+/', execute: openCommandPalette },
     { id: 'ext:rhwpp.about', label: 'rhwpp 정보', opensDialog: true, execute: () => void showDesktopAbout() },
+    {
+      id: 'ext:rhwpp.check-update',
+      label: '업데이트 확인',
+      canExecute: isTauri,
+      execute: () => void checkForUpdates().catch((error) => notify(`업데이트를 확인하지 못했습니다.\n${error}`, true)),
+    },
+    {
+      id: 'ext:rhwpp.auto-update',
+      label: '자동 업데이트 켜기/끄기',
+      canExecute: isTauri,
+      execute: () => void toggleAutoUpdate().catch((error) => notify(`설정을 바꾸지 못했습니다.\n${error}`, true)),
+    },
   ];
   for (const def of defs) automation.registerCommand(def);
 
@@ -116,5 +134,7 @@ export function registerDesktopCommands(): void {
   place('file', 'ext:rhwpp.close', 'bottom');
   place('file', 'ext:rhwpp.exit', 'bottom');
   place('tool', 'ext:rhwpp.command-palette', 'bottom');
+  place('tool', 'ext:rhwpp.check-update', 'bottom');
+  place('tool', 'ext:rhwpp.auto-update', 'bottom');
   place('tool', 'ext:rhwpp.about', 'bottom');
 }

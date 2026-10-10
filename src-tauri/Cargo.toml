@@ -24,6 +24,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 percent-encoding = "2"
 tokio = { version = "1", features = ["time", "sync"] }
+# 자동 업데이트: 릴리스 확인·설치 파일 받기(Windows 는 schannel TLS, 시스템 프록시 설정 사용)
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "system-proxy"] }
+semver = "1"
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [profile.release]
 codegen-units = 1

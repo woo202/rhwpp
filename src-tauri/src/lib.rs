@@ -6,6 +6,7 @@
 mod access;
 mod files;
 mod state;
+mod updater;
 mod windows;
 
 use tauri::{DragDropEvent, Emitter, Manager, WindowEvent};
@@ -31,6 +32,10 @@ pub fn run() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             app.manage(AppState::new(&data_dir));
+            let local_data_dir = app.path().app_local_data_dir()?;
+            let version = app.package_info().version.clone();
+            app.manage(updater::Updater::new(version, &data_dir, &local_data_dir));
+            updater::start(app.handle());
             let cwd = std::env::current_dir().unwrap_or_default();
             let paths = state::document_args(std::env::args_os().skip(1), &cwd);
             windows::create_document_window(app.handle(), paths, None)?;
@@ -86,7 +91,18 @@ pub fn run() {
             windows::set_window_document,
             windows::focus_window_for_document,
             windows::destroy_window,
+            updater::update_status,
+            updater::update_check,
+            updater::update_take_notice,
+            updater::update_set_auto,
+            updater::update_install_now,
         ])
-        .run(tauri::generate_context!())
-        .expect("rhwpp 실행 중 오류가 발생했습니다");
+        .build(tauri::generate_context!())
+        .expect("rhwpp 실행 중 오류가 발생했습니다")
+        .run(|app, event| {
+            // 모든 창이 닫혀 끝날 때 받아 둔 업데이트를 설치한다.
+            if let tauri::RunEvent::Exit = event {
+                updater::on_exit(app);
+            }
+        });
 }
