@@ -9,7 +9,7 @@
  */
 import './styles/hangul.css';
 import { installDownloadInterceptor } from './native/downloads';
-import { NativeFileHandle, prefetch } from './native/file-handle';
+import { FILE_READ_EVENT, NativeFileHandle, prefetch } from './native/file-handle';
 import { isTauri, openWindow, takeLaunchFiles } from './native/ipc';
 import { installLaunchQueue, launchQueue } from './native/launch-queue';
 import { markLaunchSettled } from './native/launch-state';
@@ -61,14 +61,37 @@ if (tauri) {
   markLaunchSettled();
 }
 
-/** 시작 문서가 이 창에 열릴 때까지(또는 시간 초과·실패) 기다린다. */
-function waitForDocument(path: string, timeoutMs: number): Promise<void> {
+/** 스튜디오가 문서를 받을 준비를 마친 뒤 파일 읽기가 끝나기를 기다리는 상한(느린 디스크·네트워크 드라이브). */
+const LAUNCH_READ_WAIT_MS = 30_000;
+/** 무슨 일이 있어도 시작 흐름을 풀어 주는 상한. */
+const MAX_LAUNCH_WAIT_MS = 120_000;
+
+/**
+ * 시작 문서가 이 창에 열릴 때까지(또는 실패·시간 초과) 기다린다. 그동안 스튜디오는 복구 질문과
+ * 빈 새 문서 만들기를 미룬다. WASM 초기화나 파일 읽기가 느린 PC 에서 빈 문서가 시작 문서보다
+ * 먼저 뜨지 않도록, 파싱 시간 제한(`parseMs`)은 파일 읽기가 끝난 때부터 잰다.
+ */
+function waitForDocument(path: string, parseMs: number): Promise<void> {
   return new Promise((resolve) => {
     const started = Date.now();
+    let readyAt: number | null = null;
+    let readAt: number | null = null;
+    const onRead = (event: Event) => {
+      const detail = (event as CustomEvent<{ path?: string }>).detail;
+      if (readAt === null && detail?.path && samePath(detail.path, path)) readAt = Date.now();
+    };
+    window.addEventListener(FILE_READ_EVENT, onRead);
     const timer = window.setInterval(() => {
+      const now = Date.now();
+      if (readyAt === null && launchQueue.ready) readyAt = now;
       const current = studio.filePath();
-      if ((current && samePath(current, path)) || Date.now() - started > timeoutMs) {
+      const opened = current !== null && samePath(current, path);
+      const timedOut = (readAt !== null && now - readAt > parseMs)
+        || (readAt === null && readyAt !== null && now - readyAt > LAUNCH_READ_WAIT_MS)
+        || now - started > MAX_LAUNCH_WAIT_MS;
+      if (opened || timedOut) {
         window.clearInterval(timer);
+        window.removeEventListener(FILE_READ_EVENT, onRead);
         resolve();
       }
     }, 50);

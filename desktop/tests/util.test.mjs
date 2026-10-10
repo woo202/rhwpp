@@ -10,6 +10,7 @@ import {
   matchesShortcut,
   mimeTypeFor,
   nativeHandleRecord,
+  resolvePrefetched,
   samePath,
 } from '../src/util.ts';
 
@@ -84,4 +85,22 @@ test('문서 탭 이름', async () => {
   assert.deepEqual(tabLabelFromTitle('*보고서.hwp [C:\\문서\\] - rhwpp'), { name: '보고서.hwp', dirty: true });
   assert.deepEqual(tabLabelFromTitle('새 문서.hwp - rhwpp'), { name: '새 문서.hwp', dirty: false });
   assert.deepEqual(tabLabelFromTitle('rhwpp'), { name: '빈 문서', dirty: false });
+});
+
+test('미리 읽기: 읽는 중인 값을 기다리고, 실패하면 다시 읽는다', async () => {
+  let reads = 0;
+  const read = async () => { reads += 1; return new Uint8Array([9]); };
+  let finish;
+  const pending = new Promise((resolve) => { finish = resolve; });
+  const result = resolvePrefetched(pending, read);
+  finish(new Uint8Array([1, 2, 3]));
+  const bytes = await result;
+  assert.deepEqual([...bytes], [1, 2, 3]);
+  // File 에 넣었을 때 내용이 실제 바이트여야 한다("[object Promise]" 가 아니라).
+  assert.equal(new File([bytes], 'a.hwp').size, 3);
+  assert.deepEqual([...await resolvePrefetched(new Uint8Array([4]), read)], [4]);
+  assert.equal(reads, 0);
+  assert.deepEqual([...await resolvePrefetched(Promise.reject(new Error('x')), read)], [9]);
+  assert.deepEqual([...await resolvePrefetched(undefined, read)], [9]);
+  assert.equal(reads, 2);
 });

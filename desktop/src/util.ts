@@ -147,3 +147,17 @@ export function tabLabelFromTitle(title: string, appName = 'rhwpp'): { name: str
   if (dirty) text = text.slice(1);
   return { name: text || '빈 문서', dirty };
 }
+
+/**
+ * 미리 읽어 둔 값(아직 읽는 중이면 Promise)을 기다려 꺼낸다. 미리 읽기가 없거나 실패했으면
+ * `read()` 로 다시 읽는다. 읽는 중인 Promise 를 그대로 `File` 에 넣으면 내용이
+ * "[object Promise]" 문자열이 되어 문서 열기가 실패한다.
+ */
+export async function resolvePrefetched<T>(cached: Promise<T> | T | undefined, read: () => Promise<T>): Promise<T> {
+  if (cached === undefined) return read();
+  try {
+    return await cached;
+  } catch {
+    return read();
+  }
+}

@@ -83,20 +83,33 @@ jobs:
       - name: 설치 파일 빌드 (NSIS + MSI)
         run: npx tauri build
 
-      - name: 실행 확인 (문서를 연 채로 20초 동작 + 화면 캡처)
+      - name: 실행 확인 (문서를 연 채로 동작 + 화면 캡처)
         shell: pwsh
         run: |
           $doc = Resolve-Path upstream/rhwp/saved/blank2010.hwp
           $p = Start-Process -FilePath src-tauri/target/release/rhwpp.exe -ArgumentList "`"$doc`"" -PassThru
-          Start-Sleep -Seconds 20
-          if ($p.HasExited) { throw "rhwpp.exe 가 시작 직후 종료되었습니다 (exit $($p.ExitCode))" }
+          # 처음 켜는 러너는 WebView2·WASM 준비가 느리다. 제목에 문서 이름이 뜰 때까지 기다리고(최대 60초),
+          # 그 뒤 10초 더 지켜보며 빈 새 문서가 시작 문서를 밀어내지 않는지 본다.
+          $title = ''
+          $seen = $null
+          for ($i = 0; $i -lt 60 -and -not $seen; $i++) {
+            Start-Sleep -Seconds 1
+            if ($p.HasExited) { throw "rhwpp.exe 가 시작 직후 종료되었습니다 (exit $($p.ExitCode))" }
+            $title = (Get-Process -Id $p.Id).MainWindowTitle
+            if ($title.Contains('blank2010.hwp')) { $seen = $i + 1 }
+          }
+          if ($seen) {
+            Write-Host "문서가 열리기까지 약 ${seen}초"
+            Start-Sleep -Seconds 10
+            if ($p.HasExited) { throw "rhwpp.exe 가 문서를 연 뒤 종료되었습니다 (exit $($p.ExitCode))" }
+            $title = (Get-Process -Id $p.Id).MainWindowTitle
+          }
           Add-Type -AssemblyName System.Windows.Forms, System.Drawing
           $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
           $bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
           $g = [System.Drawing.Graphics]::FromImage($bmp)
           $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
           $bmp.Save("$PWD/smoke-screenshot.png")
-          $title = (Get-Process -Id $p.Id).MainWindowTitle
           Write-Host "창 제목: $title"
           Stop-Process -Id $p.Id -Force
           if (-not $title.Contains('blank2010.hwp')) { throw "문서가 열리지 않았습니다 (창 제목: $title)" }

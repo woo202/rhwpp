@@ -15,7 +15,7 @@ import type {
   FileSystemPermissionState,
   FileSystemWritableFileStreamLike,
 } from '@/command/file-system-access';
-import { mimeTypeFor, nativeHandleRecord, samePath } from '../util';
+import { mimeTypeFor, nativeHandleRecord, resolvePrefetched, samePath } from '../util';
 import { baseName, readFile, writeFile } from './ipc';
 import { notify } from '../ui/notify';
 
@@ -48,6 +48,9 @@ class NativeWritable implements FileSystemWritableFileStreamLike {
   }
 }
 
+/** `getFile()` 이 끝날 때 보내는 창 이벤트. detail: { path } */
+export const FILE_READ_EVENT = 'rhwpp:file-read';
+
 export class NativeFileHandle implements FileSystemFileHandleLike {
   readonly kind = 'file' as const;
   readonly name: string;
@@ -61,8 +64,14 @@ export class NativeFileHandle implements FileSystemFileHandleLike {
   }
 
   async getFile(): Promise<File> {
-    const bytes = takePrefetched(this.path) ?? await readFile(this.path);
-    return new File([bytes as BlobPart], this.name, { type: mimeTypeFor(this.name) });
+    try {
+      // 시작 문서는 미리 읽는 중일 수 있다(느린 PC). 끝날 때까지 기다리고, 실패했으면 다시 읽는다.
+      const bytes = await resolvePrefetched(takePrefetched(this.path), () => readFile(this.path));
+      return new File([bytes as BlobPart], this.name, { type: mimeTypeFor(this.name) });
+    } finally {
+      // 성공·실패와 관계없이 읽기가 끝났음을 알린다(boot.ts 가 시작 문서 대기 시간을 여기서부터 잰다).
+      window.dispatchEvent(new CustomEvent(FILE_READ_EVENT, { detail: { path: this.path } }));
+    }
   }
 
   async createWritable(): Promise<FileSystemWritableFileStreamLike> {

@@ -370,6 +370,11 @@ param(
         }
     }
 
+    # A per-user copy removed earlier from Settings > Apps leaves the same values behind.
+    function Clear-OrphanedUserFileTypes {
+        if (@(Get-InstalledApp | Where-Object { $_.Scope -eq 'CurrentUser' }).Count -eq 0) { Clear-UserFileTypes }
+    }
+
     function Remove-MsiInstallation($Item) {
         Write-Step "Removing $AppName $($Item.Version) installed from the MSI package (administrator permission needed)..."
         $msiexec = Join-Path $env:SystemRoot 'System32\msiexec.exe'
@@ -468,6 +473,7 @@ param(
                         Wait-AppClosed @($user[0].Location)
                         Remove-UserCopy $user[0]
                     }
+                    if ($scope -eq 'AllUsers') { Clear-OrphanedUserFileTypes }
                     if ($Launch) { Start-App $existing.Location }
                     return
                 }
@@ -519,6 +525,7 @@ param(
             }
             # Only now that the all-users copy works (a refused UAC prompt stops earlier).
             if ($replaceUser) { Remove-UserCopy $user[0] }
+            if ($scope -eq 'AllUsers') { Clear-OrphanedUserFileTypes }
 
             Write-Host ''
             Write-Host "$AppName $target is installed in $($result.Location)." -ForegroundColor Green
