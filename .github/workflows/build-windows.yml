@@ -28,6 +28,14 @@ jobs:
       - name: 저장소 받기
         uses: actions/checkout@v4
 
+      - name: 태그와 앱 버전 확인 (v* 태그)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          # install.ps1 은 설치 파일 이름의 버전으로 v<버전> 릴리스를 찾는다.
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw "태그 $env:GITHUB_REF_NAME 가 package.json 버전 v$version 과 다릅니다" }
+
       - name: Node.js
         uses: actions/setup-node@v4
         with:
@@ -101,6 +109,43 @@ jobs:
           path: smoke-screenshot.png
           if-no-files-found: ignore
 
+      - name: 한 줄 설치 스크립트 확인 (실제 설치 파일로 설치·재실행·제거)
+        shell: pwsh
+        run: |
+          $rel = Join-Path $env:RUNNER_TEMP 'release'
+          New-Item -ItemType Directory -Force -Path $rel | Out-Null
+          Copy-Item src-tauri/target/release/bundle/nsis/*-setup.exe, install.ps1 $rel
+          Get-ChildItem $rel -File | ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name } |
+            Set-Content (Join-Path $rel 'SHA256SUMS.txt') -Encoding ascii
+          $server = Start-Process python -ArgumentList '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', $rel -PassThru -WindowStyle Hidden
+          try {
+            Start-Sleep -Seconds 3
+            $url = 'http://127.0.0.1:8765'
+            $exe = Join-Path $env:LOCALAPPDATA 'rhwpp\rhwpp.exe'
+
+            # 1. Windows PowerShell 5.1 (다른 PC 기본값)로 새로 설치
+            powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -ReleaseUrl $url
+            if ($LASTEXITCODE -ne 0) { throw "설치 실패 (exit $LASTEXITCODE)" }
+            if (-not (Test-Path $exe)) { throw "$exe 가 없습니다" }
+
+            # 2. README 와 같은 irm 경로(5.1), 같은 버전이면 건너뛰는지
+            $out = powershell -NoProfile -Command "& ([scriptblock]::Create((irm $url/install.ps1))) -ReleaseUrl $url" | Out-String
+            Write-Host $out
+            if ($out -notmatch 'is already installed') { throw 'irm 으로 받은 스크립트가 기존 설치를 알아보지 못했습니다' }
+
+            # 3. PowerShell 7 로 다시 설치
+            pwsh -NoProfile -File install.ps1 -ReleaseUrl $url -Force
+            if ($LASTEXITCODE -ne 0) { throw "재설치 실패 (exit $LASTEXITCODE)" }
+
+            # 4. 제거
+            powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Uninstall
+            if ($LASTEXITCODE -ne 0) { throw "제거 실패 (exit $LASTEXITCODE)" }
+            if (Test-Path $exe) { throw "제거 뒤에도 $exe 가 남아 있습니다" }
+            if (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\rhwpp') { throw '제거 뒤에도 등록 정보가 남아 있습니다' }
+          } finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+          }
+
       - name: 휴대용 실행 파일 묶기
         shell: pwsh
         run: |
@@ -126,11 +171,22 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: rhwpp-windows-x64
-          path: dist
+          path: artifact
+      - name: 릴리스 파일 모으기 (설치 스크립트 + SHA256SUMS.txt)
+        run: |
+          mkdir release
+          find artifact -type f -exec cp -t release {} +
+          cp install.ps1 release/
+          cd release
+          sha256sum -- * > ../SHA256SUMS.txt
+          mv ../SHA256SUMS.txt .
+          cat SHA256SUMS.txt
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/**/*
+          files: release/*
+          fail_on_unmatched_files: true
           generate_release_notes: true

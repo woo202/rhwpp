@@ -50,12 +50,59 @@
 
 ## 설치
 
-1. [Actions](../../actions/workflows/build-windows.yml)의 최근 성공한 빌드에서 `rhwpp-windows-x64`
-   산출물을 받거나, `v*` 태그 릴리스에서 설치 파일을 받습니다.
-2. `rhwpp_x.y.z_x64-setup.exe`(NSIS) 또는 `rhwpp_x.y.z_x64_ko-KR.msi`를 실행합니다.
+### 명령어 한 줄로 설치 (권장)
+
+설치할 PC에서 PowerShell을 열고(시작 단추 → `PowerShell` 입력) 아래 한 줄을 붙여 넣습니다.
+관리자 권한은 필요 없습니다.
+
+```powershell
+irm https://github.com/woo202/rhwpp/releases/latest/download/install.ps1 | iex
+```
+
+- 최신 릴리스의 설치 파일을 받아 릴리스의 `SHA256SUMS.txt`와 SHA-256 값을 맞춰 본 뒤, 현재 사용자용으로
+  조용히 설치합니다(`%LOCALAPPDATA%\rhwpp`). 시작 메뉴·바탕 화면 바로 가기와 `.hwp`·`.hwpx`·`.hml`
+  파일 연결도 만듭니다.
+- 같은 명령을 다시 실행하면 새 버전으로 업데이트합니다. 이미 최신이면 아무것도 하지 않습니다.
+- rhwpp가 열려 있으면 저장하고 닫을 때까지 기다립니다.
+- 명령 프롬프트(cmd)나 실행 창(Win+R)에서는 다음처럼 씁니다.
+
+  ```bat
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/woo202/rhwpp/releases/latest/download/install.ps1 | iex"
+  ```
+
+옵션을 주려면 스크립트 블록으로 실행합니다. 예: 모든 사용자용 설치
+
+```powershell
+& ([scriptblock]::Create((irm https://github.com/woo202/rhwpp/releases/latest/download/install.ps1))) -AllUsers
+```
+
+| 옵션 | 뜻 |
+| --- | --- |
+| `-AllUsers` | 이 PC의 모든 사용자용으로 `Program Files`에 설치합니다(관리자 권한 확인 창이 뜹니다). |
+| `-Version 0.1.0` | 최신 대신 지정한 릴리스를 설치합니다. |
+| `-Launch` | 설치가 끝나면 rhwpp를 실행합니다. |
+| `-Force` | 같은 버전도 다시 설치하고, 실행 중인 rhwpp를 묻지 않고 닫습니다(저장하지 않은 내용은 사라집니다). |
+| `-Uninstall` | rhwpp를 제거합니다. 문서와 설정은 남깁니다. |
+
+### 직접 받아 설치
+
+1. [Releases](../../releases/latest)에서 설치 파일을 받거나, [Actions](../../actions/workflows/build-windows.yml)의
+   최근 성공한 빌드에서 `rhwpp-windows-x64` 산출물을 받습니다.
+2. `rhwpp_x.y.z_x64-setup.exe`(NSIS) 또는 `rhwpp_x.y.z_x64_ko-KR.msi`를 실행합니다. 코드 서명이 없어서
+   브라우저로 받은 파일은 "Windows의 PC 보호" 창이 뜰 수 있습니다. **추가 정보 → 실행**을 누릅니다.
    설치 없이 쓰려면 `rhwpp-portable-x64.zip` 안의 `rhwpp.exe`를 실행합니다.
 3. Windows 10/11에 기본 포함된 Microsoft Edge WebView2 런타임을 씁니다. 없으면 설치 프로그램이
    함께 설치합니다.
+
+### 릴리스 게시 (관리자)
+
+`package.json`의 `version`과 같은 `v*` 태그를 올리면 CI가 빌드·검사한 뒤 GitHub 릴리스에 설치 파일,
+MSI, 휴대용 zip, `install.ps1`, `SHA256SUMS.txt`를 올립니다. 한 줄 설치 명령은 이 최신 릴리스를 씁니다.
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
 
 ## 단축키 (한글 기준)
 
