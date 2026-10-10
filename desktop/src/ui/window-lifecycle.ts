@@ -2,7 +2,7 @@
  * 창 수명주기: 닫기 전 저장 확인, 프로그램 끝(Alt+X), 창 제목 동기화.
  */
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { destroyWindow, isTauri, setWindowDocument } from '../native/ipc';
+import { destroyWindow, isTauri, setWindowDocument, updateCancelInstall } from '../native/ipc';
 import { documentTitle } from '../util';
 import * as studio from '../studio';
 
@@ -80,7 +80,11 @@ export async function closeThisWindow(): Promise<boolean> {
       await win.unminimize().catch(() => undefined);
       await win.setFocus().catch(() => undefined);
     }
-    if (!await studio.confirmDiscardOrSave()) return false;
+    if (!await studio.confirmDiscardOrSave()) {
+      // 끝내기(또는 "지금 다시 시작")를 취소했다. 나중에 평범하게 끝낼 때 다시 실행되지 않게 한다.
+      if (isTauri()) void updateCancelInstall().catch(() => undefined);
+      return false;
+    }
     await studio.discardRecoveryDraft();
     if (isTauri()) await destroyWindow();
     else window.close();

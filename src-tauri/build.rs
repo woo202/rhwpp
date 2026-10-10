@@ -24,6 +24,7 @@ fn main() {
         "update_take_notice",
         "update_set_auto",
         "update_install_now",
+        "update_cancel_install",
     ];
     tauri_build::try_build(
         tauri_build::Attributes::new()

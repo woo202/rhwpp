@@ -44,6 +44,7 @@
     "allow-update-check",
     "allow-update-take-notice",
     "allow-update-set-auto",
-    "allow-update-install-now"
+    "allow-update-install-now",
+    "allow-update-cancel-install"
   ]
 }

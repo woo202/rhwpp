@@ -85,9 +85,11 @@ class DesktopAboutDialog extends ModalDialog {
 async function showDesktopAbout(): Promise<void> {
   const dir = isTauri() ? await appDataDir().catch(() => '') : '';
   const status = isTauri() ? await updateStatus().catch(() => null) : null;
+  const onOff = status?.auto ? '켜짐' : '꺼짐';
   const autoUpdate = !status ? '-'
-    : status.kind === 'portable' ? '설치된 프로그램이 아니어서 쓰지 않음'
-      : status.auto ? '켜짐' : '꺼짐';
+    : status.kind === 'portable' ? `새 버전 알림만 (${onOff})`
+      : status.kind === 'allUsers' ? `${onOff} (설치는 관리자 확인 후)`
+        : onOff;
   new DesktopAboutDialog(dir, autoUpdate).show();
 }
 

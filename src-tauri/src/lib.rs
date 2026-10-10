@@ -96,13 +96,16 @@ pub fn run() {
             updater::update_take_notice,
             updater::update_set_auto,
             updater::update_install_now,
+            updater::update_cancel_install,
         ])
         .build(tauri::generate_context!())
         .expect("rhwpp 실행 중 오류가 발생했습니다")
-        .run(|app, event| {
-            // 모든 창이 닫혀 끝날 때 받아 둔 업데이트를 설치한다.
-            if let tauri::RunEvent::Exit = event {
-                updater::on_exit(app);
-            }
+        .run(|app, event| match event {
+            // 사용자가 마지막 창을 닫아 끝낼 때만 온다. Windows 종료·Restart Manager 로 끝날 때는
+            // 오지 않으므로 그때는 업데이트를 설치하지 않는다.
+            tauri::RunEvent::ExitRequested { .. } => updater::note_exit_requested(app),
+            // 받아 둔 업데이트를 설치한다.
+            tauri::RunEvent::Exit => updater::on_exit(app),
+            _ => {}
         });
 }

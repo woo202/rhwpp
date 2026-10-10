@@ -49,6 +49,8 @@ pub enum UpdateState {
     /// 아직 확인하지 않았다.
     Unknown,
     UpToDate,
+    /// 새 버전을 받는 중이다(알리지 않는다).
+    Downloading,
     /// 새 버전이 있지만 받지 않았다(휴대용·MSI, 또는 받기 실패).
     Available,
     /// 받아서 확인을 마쳤다. 설치만 남았다.
@@ -90,16 +92,37 @@ struct Inner {
     state: Option<UpdateState>,
     error: Option<String>,
     last_check: Option<Instant>,
-    /// 사용자에게 이미 알린 버전(창마다, 확인할 때마다 거듭 알리지 않게).
-    notified: Option<Version>,
-    /// "지금 다시 시작"을 눌렀다: 끝낼 때 설치하고 다시 실행한다.
+    /// 사용자에게 이미 알린 버전과 상태(창마다, 확인할 때마다 거듭 알리지 않게).
+    /// 상태도 함께 보므로 "새 버전 있음"을 알린 뒤 받기를 마치면 "받았음"을 다시 알린다.
+    notified: Option<(Version, UpdateState)>,
+    /// "지금 다시 시작"을 눌렀다: 끝낼 때 설치하고 다시 실행한다. 저장 확인에서 취소하면 지운다.
     install_requested: bool,
+}
+
+impl Inner {
+    /// 아직 알리지 않은 "받았음/새 버전 있음"이면 알린 것으로 표시하고 true.
+    fn take_notice(&mut self) -> bool {
+        let Some(state) = self.state else { return false };
+        if !matches!(state, UpdateState::Ready | UpdateState::Available) {
+            return false;
+        }
+        let Some(latest) = self.latest.as_ref().map(|l| l.version.clone()) else { return false };
+        let key = (latest, state);
+        if self.notified.as_ref() == Some(&key) {
+            return false;
+        }
+        self.notified = Some(key);
+        true
+    }
 }
 
 pub struct Updater {
     inner: Mutex<Inner>,
     auto: AtomicBool,
-    checking: AtomicBool,
+    /// 확인·받기는 한 번에 하나. 수동 확인은 진행 중인 확인이 끝나기를 기다린다.
+    check_lock: tokio::sync::Mutex<()>,
+    /// 사용자가 마지막 창을 닫아 끝내는 중이다(Windows 종료·Restart Manager 로 끝날 때는 아니다).
+    exit_requested: AtomicBool,
     kind: InstallKind,
     current: Version,
     settings_path: PathBuf,
@@ -122,7 +145,8 @@ impl Updater {
         Self {
             inner: Mutex::new(Inner::default()),
             auto: AtomicBool::new(auto),
-            checking: AtomicBool::new(false),
+            check_lock: tokio::sync::Mutex::new(()),
+            exit_requested: AtomicBool::new(false),
             kind: detect_install_kind(),
             current,
             settings_path,
@@ -248,8 +272,23 @@ fn setup_url(entry: &ReleaseEntry) -> String {
     }
 }
 
-fn http_client(current: &Version) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+/// 요청에 쓸 프록시. `System` 이면 reqwest 의 시스템 프록시(수동으로 적은 프록시) 처리에 맡긴다.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
+enum ProxyChoice {
+    System,
+    Direct,
+    Named(String),
+}
+
+fn http_client(current: &Version, proxy: &ProxyChoice) -> Result<reqwest::Client, String> {
+    let builder = match proxy {
+        ProxyChoice::System => reqwest::Client::builder(),
+        ProxyChoice::Direct => reqwest::Client::builder().no_proxy(),
+        ProxyChoice::Named(url) => reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(url.as_str()).map_err(|e| e.to_string())?),
+    };
+    builder
         .user_agent(format!("rhwpp/{current}"))
         .connect_timeout(Duration::from_secs(20))
         .timeout(Duration::from_secs(15 * 60))
@@ -267,7 +306,104 @@ fn http_client(current: &Version) -> Result<reqwest::Client, String> {
         .map_err(|e| e.to_string())
 }
 
-async fn fetch(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> {
+/// 자동 프록시 설정(PAC 스크립트, "자동으로 설정 검색")이 있으면 그 결과를 따른다.
+/// reqwest 는 수동으로 적은 프록시만 읽으므로 WinHTTP 로 주소별 프록시를 구한다.
+async fn proxy_for(url: &str) -> ProxyChoice {
+    if test_base_url().is_some() {
+        return ProxyChoice::Direct;
+    }
+    let url = url.to_string();
+    tauri::async_runtime::spawn_blocking(move || resolve_auto_proxy(&url))
+        .await
+        .unwrap_or(ProxyChoice::System)
+}
+
+#[cfg(windows)]
+fn resolve_auto_proxy(url: &str) -> ProxyChoice {
+    use windows_sys::Win32::Foundation::GlobalFree;
+    use windows_sys::Win32::Networking::WinHttp::*;
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+    /// WinHTTP 가 GlobalAlloc 으로 준 문자열을 읽고 풀어 준다.
+    unsafe fn take(ptr: *mut u16) -> Option<String> {
+        if ptr.is_null() {
+            return None;
+        }
+        let len = (0..).take_while(|&i| *ptr.add(i) != 0).count();
+        let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
+        GlobalFree(ptr.cast());
+        Some(text)
+    }
+
+    // SAFETY: 구조체는 0 으로 초기화한 뒤 WinHTTP 가 채우고, 돌려받은 문자열은 모두 take() 로 푼다.
+    unsafe {
+        let mut ie: WINHTTP_CURRENT_USER_IE_PROXY_CONFIG = std::mem::zeroed();
+        if WinHttpGetIEProxyConfigForCurrentUser(&mut ie) == 0 {
+            return ProxyChoice::System;
+        }
+        let auto_detect = ie.fAutoDetect != 0;
+        let config_url = take(ie.lpszAutoConfigUrl);
+        let _ = take(ie.lpszProxy);
+        let _ = take(ie.lpszProxyBypass);
+        if !auto_detect && config_url.is_none() {
+            return ProxyChoice::System;
+        }
+
+        let agent = wide("rhwpp-updater");
+        let session = WinHttpOpen(agent.as_ptr(), WINHTTP_ACCESS_TYPE_NO_PROXY, std::ptr::null(), std::ptr::null(), 0);
+        if session.is_null() {
+            return ProxyChoice::System;
+        }
+        let config_wide = config_url.as_deref().map(wide);
+        let mut options: WINHTTP_AUTOPROXY_OPTIONS = std::mem::zeroed();
+        if let Some(config) = config_wide.as_ref() {
+            options.dwFlags |= WINHTTP_AUTOPROXY_CONFIG_URL;
+            options.lpszAutoConfigUrl = config.as_ptr();
+        }
+        if auto_detect {
+            options.dwFlags |= WINHTTP_AUTOPROXY_AUTO_DETECT;
+            options.dwAutoDetectFlags = WINHTTP_AUTO_DETECT_TYPE_DHCP | WINHTTP_AUTO_DETECT_TYPE_DNS_A;
+        }
+        options.fAutoLogonIfChallenged = 1;
+        let target = wide(url);
+        let mut info: WINHTTP_PROXY_INFO = std::mem::zeroed();
+        let found = WinHttpGetProxyForUrl(session, target.as_ptr(), &mut options, &mut info) != 0;
+        WinHttpCloseHandle(session);
+        if !found {
+            // 자동 검색 실패(대부분의 가정용 PC): 수동 설정이나 직접 연결로.
+            return ProxyChoice::System;
+        }
+        let proxy = take(info.lpszProxy);
+        let _ = take(info.lpszProxyBypass);
+        match (info.dwAccessType, proxy) {
+            (WINHTTP_ACCESS_TYPE_NAMED_PROXY, Some(list)) => {
+                first_proxy(&list).map(ProxyChoice::Named).unwrap_or(ProxyChoice::System)
+            }
+            _ => ProxyChoice::Direct,
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn resolve_auto_proxy(_url: &str) -> ProxyChoice {
+    ProxyChoice::System
+}
+
+/// WinHTTP 프록시 목록("a:8080; b:8080", "https=a:443")에서 첫 프록시를 reqwest 주소로.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn first_proxy(list: &str) -> Option<String> {
+    let entry = list.split([';', ' ', '\t']).map(str::trim).find(|e| !e.is_empty())?;
+    let entry = entry.split_once('=').map_or(entry, |(_, v)| v);
+    if entry.is_empty() {
+        return None;
+    }
+    Some(if entry.contains("://") { entry.to_string() } else { format!("http://{entry}") })
+}
+
+async fn fetch(current: &Version, url: &str) -> Result<Vec<u8>, String> {
+    let client = http_client(current, &proxy_for(url).await)?;
     let response = client
         .get(url)
         .send()
@@ -308,18 +444,23 @@ fn clean_download_dir(dir: &Path, keep: Option<&Path>) {
 /// 새 버전을 확인하고, 설치할 수 있는 경우 받아 둔다. 알릴 것이 생기면 창에 이벤트를 보낸다.
 pub async fn check<R: Runtime>(app: &AppHandle<R>, manual: bool) -> UpdateStatus {
     let updater = updater(app);
-    {
-        let inner = updater.inner.lock().unwrap();
-        let recent = inner.last_check.is_some_and(|t| t.elapsed() < MIN_AUTO_INTERVAL);
-        if !manual && recent {
-            return updater.status_locked(&inner);
+    let _guard = if manual {
+        // 진행 중인 확인(받기 포함)이 있으면 끝나기를 기다렸다가 새로 확인한다.
+        updater.check_lock.lock().await
+    } else {
+        let recent = {
+            let inner = updater.inner.lock().unwrap();
+            inner.last_check.is_some_and(|t| t.elapsed() < MIN_AUTO_INTERVAL)
+        };
+        if recent {
+            return updater.status();
         }
-    }
-    if updater.checking.swap(true, Ordering::SeqCst) {
-        return updater.status();
-    }
+        match updater.check_lock.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => return updater.status(),
+        }
+    };
     let result = check_inner(&updater).await;
-    updater.checking.store(false, Ordering::SeqCst);
 
     let status = {
         let mut inner = updater.inner.lock().unwrap();
@@ -327,11 +468,12 @@ pub async fn check<R: Runtime>(app: &AppHandle<R>, manual: bool) -> UpdateStatus
         match result {
             Ok(()) => inner.error = None,
             Err(error) => {
-                // 받기만 실패했으면 "새 버전 있음"으로 남긴다.
-                if inner.latest.is_some() && inner.state != Some(UpdateState::Ready) {
-                    inner.state = Some(UpdateState::Available);
-                } else if inner.latest.is_none() {
-                    inner.state = Some(UpdateState::Error);
+                match inner.state {
+                    // 앞서 받아 둔 업데이트는 그대로 둔다.
+                    Some(UpdateState::Ready) if inner.ready.is_some() => {}
+                    // 새 버전은 찾았지만 받기에 실패했다.
+                    _ if inner.latest.is_some() => inner.state = Some(UpdateState::Available),
+                    _ => inner.state = Some(UpdateState::Error),
                 }
                 inner.error = Some(error);
             }
@@ -345,8 +487,7 @@ pub async fn check<R: Runtime>(app: &AppHandle<R>, manual: bool) -> UpdateStatus
 }
 
 async fn check_inner(updater: &Updater) -> Result<(), String> {
-    let client = http_client(&updater.current)?;
-    let sums = fetch(&client, &checksums_url()).await?;
+    let sums = fetch(&updater.current, &checksums_url()).await?;
     let text = String::from_utf8_lossy(&sums);
     let entry = parse_checksums(&text).ok_or("릴리스에 x64 설치 파일 정보가 없습니다.")?;
 
@@ -369,7 +510,11 @@ async fn check_inner(updater: &Updater) -> Result<(), String> {
             return Ok(());
         }
         inner.ready = None;
-        inner.state = Some(UpdateState::Available);
+        inner.state = Some(if updater.kind == InstallKind::Portable {
+            UpdateState::Available
+        } else {
+            UpdateState::Downloading
+        });
     }
     if updater.kind == InstallKind::Portable {
         return Ok(());
@@ -379,7 +524,7 @@ async fn check_inner(updater: &Updater) -> Result<(), String> {
     let target = updater.download_dir.join(&entry.setup_name);
     clean_download_dir(&updater.download_dir, Some(&target));
     if file_sha256(&target).as_deref() != Some(entry.sha256.as_str()) {
-        let bytes = fetch(&client, &setup_url(&entry)).await?;
+        let bytes = fetch(&updater.current, &setup_url(&entry)).await?;
         let actual = sha256_hex(&bytes);
         if actual != entry.sha256 {
             return Err(format!("받은 설치 파일이 손상되었거나 바뀌었습니다(SHA-256 {actual})."));
@@ -413,9 +558,31 @@ pub fn start<R: Runtime>(app: &AppHandle<R>) {
     });
 }
 
-/// 프로그램이 끝날 때(모든 창이 닫힌 뒤) 받아 둔 업데이트를 설치한다.
+/// 마지막 창이 닫혀 끝나기 시작했다(`RunEvent::ExitRequested`). Windows 종료·로그오프나
+/// Restart Manager(다른 설치·제거 프로그램)가 끝낼 때는 이 단계 없이 바로 `Exit` 가 온다.
+pub fn note_exit_requested<R: Runtime>(app: &AppHandle<R>) {
+    updater(app).exit_requested.store(true, Ordering::SeqCst);
+}
+
+#[cfg(windows)]
+fn system_shutting_down() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SHUTTINGDOWN};
+    // SAFETY: 인수 없는 단순 조회.
+    unsafe { GetSystemMetrics(SM_SHUTTINGDOWN) != 0 }
+}
+
+#[cfg(not(windows))]
+fn system_shutting_down() -> bool {
+    false
+}
+
+/// 사용자가 프로그램을 끝낼 때(모든 창이 닫힌 뒤) 받아 둔 업데이트를 설치한다.
 pub fn on_exit<R: Runtime>(app: &AppHandle<R>) {
     let updater = updater(app);
+    // 끝나는 세션이나 다른 설치 프로그램과 겹쳐 설치하다 끊기면 실행 파일이 망가진다.
+    if !updater.exit_requested.load(Ordering::SeqCst) || system_shutting_down() {
+        return;
+    }
     let inner = updater.inner.lock().unwrap();
     let Some(ready) = inner.ready.as_ref() else { return };
     if inner.state != Some(UpdateState::Ready)
@@ -536,9 +703,9 @@ pub fn update_status(app: AppHandle) -> UpdateStatus {
 #[tauri::command]
 pub async fn update_check(app: AppHandle) -> UpdateStatus {
     let status = check(&app, true).await;
-    // 수동으로 확인한 결과는 그 자리에서 보여 주므로 다시 알리지 않는다.
+    // 수동으로 확인한 결과는 그 자리에서 보여 주므로 같은 알림을 다시 띄우지 않는다.
     if let Some(latest) = status.latest.as_ref().and_then(|v| Version::parse(v).ok()) {
-        updater(&app).inner.lock().unwrap().notified = Some(latest);
+        updater(&app).inner.lock().unwrap().notified = Some((latest, status.state));
     }
     status
 }
@@ -548,16 +715,7 @@ pub async fn update_check(app: AppHandle) -> UpdateStatus {
 pub fn update_take_notice(app: AppHandle) -> Option<UpdateStatus> {
     let updater = updater(&app);
     let mut inner = updater.inner.lock().unwrap();
-    let state = inner.state?;
-    if !matches!(state, UpdateState::Ready | UpdateState::Available) {
-        return None;
-    }
-    let latest = inner.latest.as_ref()?.version.clone();
-    if inner.notified.as_ref() == Some(&latest) {
-        return None;
-    }
-    inner.notified = Some(latest);
-    Some(updater.status_locked(&inner))
+    inner.take_notice().then(|| updater.status_locked(&inner))
 }
 
 #[tauri::command]
@@ -583,6 +741,12 @@ pub fn update_install_now(app: AppHandle) -> Result<(), String> {
     }
     crate::windows::request_quit(app);
     Ok(())
+}
+
+/// 저장 확인에서 취소해 끝내지 않게 되었다: "지금 다시 시작" 요청을 거둔다.
+#[tauri::command]
+pub fn update_cancel_install(app: AppHandle) {
+    updater(&app).inner.lock().unwrap().install_requested = false;
 }
 
 #[cfg(test)]
@@ -633,6 +797,27 @@ ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789 *rhwpp_0.2.0_x6
     fn builds_installer_arguments() {
         assert_eq!(installer_args(InstallKind::CurrentUser, false), ["/S", "/UPDATE", "/CurrentUser"]);
         assert_eq!(installer_args(InstallKind::AllUsers, true), ["/S", "/UPDATE", "/AllUsers", "/R"]);
+    }
+
+    #[test]
+    fn notices_once_per_version_and_state() {
+        let entry = parse_checksums(SUMS).unwrap();
+        let mut inner = Inner { latest: Some(entry), state: Some(UpdateState::Downloading), ..Inner::default() };
+        assert!(!inner.take_notice(), "받는 중에는 알리지 않는다");
+        inner.state = Some(UpdateState::Available);
+        assert!(inner.take_notice());
+        assert!(!inner.take_notice(), "같은 알림은 한 번만");
+        inner.state = Some(UpdateState::Ready);
+        assert!(inner.take_notice(), "'새 버전 있음' 뒤에 '받았음'은 다시 알린다");
+        assert!(!inner.take_notice());
+    }
+
+    #[test]
+    fn picks_first_proxy_from_winhttp_list() {
+        assert_eq!(first_proxy("proxy.corp:8080; backup:3128").as_deref(), Some("http://proxy.corp:8080"));
+        assert_eq!(first_proxy("https=secure:443").as_deref(), Some("http://secure:443"));
+        assert_eq!(first_proxy("  ").as_deref(), None);
+        assert_eq!(first_proxy("http://p:1").as_deref(), Some("http://p:1"));
     }
 
     #[test]

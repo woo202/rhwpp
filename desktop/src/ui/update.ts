@@ -64,6 +64,9 @@ function showStatus(status: UpdateStatus, manual: boolean): void {
     case 'upToDate':
       if (manual) notify(`최신 버전을 쓰고 있습니다 (rhwpp ${status.current}).`);
       return;
+    case 'downloading':
+      if (manual) notify(`rhwpp ${latest}을(를) 받는 중입니다. 다 받으면 알려 드립니다.`);
+      return;
     case 'error':
       if (manual) notify(`업데이트를 확인하지 못했습니다.\n${status.error ?? ''}`, true);
       return;
@@ -96,7 +99,13 @@ export async function toggleAutoUpdate(): Promise<void> {
   if (!isTauri()) return;
   const current = await updateStatus();
   const next = await updateSetAuto(!current.auto);
-  notify(next.auto
-    ? '자동 업데이트를 켰습니다. 새 버전을 받아 두었다가 프로그램을 끝낼 때 설치합니다.'
-    : '자동 업데이트를 껐습니다. 도구 › 업데이트 확인으로 직접 확인할 수 있습니다.');
+  if (!next.auto) {
+    notify('자동 업데이트를 껐습니다. 도구 › 업데이트 확인으로 직접 확인할 수 있습니다.');
+  } else if (next.kind === 'currentUser') {
+    notify('자동 업데이트를 켰습니다. 새 버전을 받아 두었다가 프로그램을 끝낼 때 설치합니다.');
+  } else if (next.kind === 'allUsers') {
+    notify('자동 업데이트를 켰습니다. 새 버전을 받아 두고 알려 드립니다. 알림의 지금 업데이트를 누르면 설치합니다(관리자 확인).');
+  } else {
+    notify('자동 업데이트 알림을 켰습니다. 설치된 프로그램이 아니어서 새 버전이 나오면 알려 드리기만 합니다.');
+  }
 }
