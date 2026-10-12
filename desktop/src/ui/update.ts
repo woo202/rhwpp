@@ -31,6 +31,13 @@ function installNow(): void {
 /** 새 버전 알림. 결과가 "최신"이나 오류이면 수동 확인일 때만 알린다. */
 function showStatus(status: UpdateStatus, manual: boolean): void {
   const latest = status.latest ?? '';
+  // 확인하는 동안 받기가 끝나 같은 알림이 이미 떠 있으면 짧게만 알린다.
+  if (manual && status.alreadyNotified && (status.state === 'ready' || status.state === 'available')) {
+    notify(status.state === 'ready'
+      ? `rhwpp ${latest} 업데이트를 이미 받아 두었습니다. 위의 알림을 보세요.`
+      : `rhwpp ${latest} 새 버전이 나와 있습니다. 위의 알림을 보세요.`);
+    return;
+  }
   switch (status.state) {
     case 'ready':
       if (status.kind === 'allUsers') {
@@ -54,7 +61,7 @@ function showStatus(status: UpdateStatus, manual: boolean): void {
     case 'available':
       showToast({
         message: status.kind === 'portable'
-          ? `rhwpp ${latest} 새 버전이 나왔습니다.\n설치된 프로그램이 아니어서 직접 받아야 합니다.`
+          ? `rhwpp ${latest} 새 버전이 나왔습니다.\n이 설치 방식(휴대용·MSI)은 스스로 업데이트하지 않으니 내려받아 설치하세요.`
           : `rhwpp ${latest} 새 버전이 나왔지만 받지 못했습니다.${status.error ? `\n${status.error}` : ''}`,
         durationMs: 0,
         action: { label: '내려받기 페이지', onClick: () => openReleasePage(status) },
@@ -106,6 +113,6 @@ export async function toggleAutoUpdate(): Promise<void> {
   } else if (next.kind === 'allUsers') {
     notify('자동 업데이트를 켰습니다. 새 버전을 받아 두고 알려 드립니다. 알림의 지금 업데이트를 누르면 설치합니다(관리자 확인).');
   } else {
-    notify('자동 업데이트 알림을 켰습니다. 설치된 프로그램이 아니어서 새 버전이 나오면 알려 드리기만 합니다.');
+    notify('자동 업데이트 알림을 켰습니다. 이 설치 방식(휴대용·MSI)은 스스로 업데이트하지 않으므로 새 버전이 나오면 알려 드리기만 합니다.');
   }
 }

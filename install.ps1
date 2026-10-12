@@ -269,8 +269,28 @@ param(
         })
     }
 
+    # rhwpp installs a downloaded update when it is closed (as rhwpp-update-setup.exe). If the
+    # user has just closed it, let that installer finish so two installers never overlap.
+    function Wait-PendingUpdate {
+        $deadline = (Get-Date).AddMinutes(2)
+        $announced = $false
+        while (@(Get-Process -Name 'rhwpp-update-setup' -ErrorAction SilentlyContinue).Count -gt 0) {
+            if (-not $announced) {
+                Write-Step "Waiting for $AppName's own update to finish..."
+                $announced = $true
+            }
+            if ((Get-Date) -gt $deadline) { throw "$AppName's own update is still running. Try again in a minute." }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+
     # The installer closes a running rhwpp by force, so give the user a chance to save first.
     function Wait-AppClosed([string[]]$Locations) {
+        Wait-AskAppClosed $Locations
+        Wait-PendingUpdate
+    }
+
+    function Wait-AskAppClosed([string[]]$Locations) {
         while ($true) {
             $running = @(Get-RunningApp $Locations)
             if ($running.Count -eq 0 -or $Force) { return }
@@ -546,6 +566,10 @@ param(
         Wait-AppClosed @(@($installed) + @($msi) | ForEach-Object { $_.Location })
         foreach ($item in $installed) { Remove-Installation $item }
         foreach ($item in $msi) { Remove-MsiInstallation $item }
+        # Updates rhwpp downloaded for itself.
+        if ($env:LOCALAPPDATA) {
+            Remove-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'io.github.woo202.rhwpp\updates') -Recurse -Force -ErrorAction SilentlyContinue
+        }
         Write-Host ''
         Write-Host "$AppName has been removed. Your documents and settings were kept." -ForegroundColor Green
     }

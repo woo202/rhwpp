@@ -117,6 +117,8 @@ export interface UpdateStatus {
   installsOnExit: boolean;
   error: string | null;
   releasesUrl: string;
+  /** 수동 확인 결과와 같은 알림을 이미 띄웠다. */
+  alreadyNotified: boolean;
 }
 
 export function updateStatus(): Promise<UpdateStatus> {

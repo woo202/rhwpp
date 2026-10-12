@@ -249,7 +249,7 @@ jobs:
             $app = Start-Process $exe -PassThru
             Remove-Item Env:RHWPP_UPDATE_URL, Env:RHWPP_UPDATE_DELAY_SECS
 
-            $downloaded = Join-Path $env:LOCALAPPDATA 'io.github.woo202.rhwpp\updates\rhwpp_99.0.0_x64-setup.exe'
+            $downloaded = Join-Path $env:LOCALAPPDATA 'io.github.woo202.rhwpp\updates\rhwpp-update-setup.exe'
             for ($i = 0; $i -lt 90 -and -not (Test-Path $downloaded); $i++) { Start-Sleep -Seconds 1 }
             if (-not (Test-Path $downloaded)) { throw "앱이 새 버전을 받지 않았습니다 ($downloaded)" }
             if ((Get-FileHash $downloaded -Algorithm SHA256).Hash -ne (Get-FileHash $setup -Algorithm SHA256).Hash) { throw '받은 설치 파일이 다릅니다' }

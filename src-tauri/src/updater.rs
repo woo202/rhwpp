@@ -30,6 +30,8 @@ const MIN_AUTO_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// 설치 파일 크기 상한(잘못된 응답으로 디스크를 채우지 않게).
 const MAX_SETUP_BYTES: usize = 300 * 1024 * 1024;
 const SETTINGS_FILE: &str = "update-settings.json";
+/// 받아 둔 설치 파일 이름. 이름이 정해져 있어야 install.ps1 등이 실행 중인 업데이트를 알아본다.
+pub const UPDATE_FILE: &str = "rhwpp-update-setup.exe";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,6 +72,8 @@ pub struct UpdateStatus {
     pub installs_on_exit: bool,
     pub error: Option<String>,
     pub releases_url: String,
+    /// 같은 알림을 이미 띄웠다(수동 확인 결과를 다시 크게 띄우지 않는다).
+    pub already_notified: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -184,6 +188,7 @@ impl Updater {
             installs_on_exit: ready && should_install_on_exit(self.kind, self.auto(), inner.install_requested),
             error: inner.error.clone(),
             releases_url: RELEASES_URL.to_string(),
+            already_notified: false,
         }
     }
 }
@@ -345,16 +350,21 @@ fn resolve_auto_proxy(url: &str) -> ProxyChoice {
         }
         let auto_detect = ie.fAutoDetect != 0;
         let config_url = take(ie.lpszAutoConfigUrl);
-        let _ = take(ie.lpszProxy);
-        let _ = take(ie.lpszProxyBypass);
+        let manual_proxy = take(ie.lpszProxy);
+        let manual_bypass = take(ie.lpszProxyBypass);
+        // 자동 설정이 없거나 실패하면 수동 설정(프로토콜별 "http=a:80;https=b:443" 형식 포함)을 따른다.
+        let manual = || match manual_proxy.as_deref() {
+            Some(list) => manual_proxy_for(url, list, manual_bypass.as_deref().unwrap_or("")),
+            None => ProxyChoice::System,
+        };
         if !auto_detect && config_url.is_none() {
-            return ProxyChoice::System;
+            return manual();
         }
 
         let agent = wide("rhwpp-updater");
         let session = WinHttpOpen(agent.as_ptr(), WINHTTP_ACCESS_TYPE_NO_PROXY, std::ptr::null(), std::ptr::null(), 0);
         if session.is_null() {
-            return ProxyChoice::System;
+            return manual();
         }
         let config_wide = config_url.as_deref().map(wide);
         let mut options: WINHTTP_AUTOPROXY_OPTIONS = std::mem::zeroed();
@@ -373,7 +383,7 @@ fn resolve_auto_proxy(url: &str) -> ProxyChoice {
         WinHttpCloseHandle(session);
         if !found {
             // 자동 검색 실패(대부분의 가정용 PC): 수동 설정이나 직접 연결로.
-            return ProxyChoice::System;
+            return manual();
         }
         let proxy = take(info.lpszProxy);
         let _ = take(info.lpszProxyBypass);
@@ -389,6 +399,65 @@ fn resolve_auto_proxy(url: &str) -> ProxyChoice {
 #[cfg(not(windows))]
 fn resolve_auto_proxy(_url: &str) -> ProxyChoice {
     ProxyChoice::System
+}
+
+/// 수동 프록시 설정(인터넷 옵션의 ProxyServer·ProxyOverride)에서 이 주소에 쓸 프록시를 고른다.
+/// "a:8080"(모든 프로토콜), "http=a:80;https=b:443"(프로토콜별) 형식을 모두 받는다.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn manual_proxy_for(url: &str, list: &str, bypass: &str) -> ProxyChoice {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("http", url));
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
+    let host = host.split(':').next().unwrap_or("").to_ascii_lowercase();
+    if bypass_matches(&host, bypass) {
+        return ProxyChoice::Direct;
+    }
+    let entries: Vec<&str> = list.split([';', ' ', '\t']).map(str::trim).filter(|e| !e.is_empty()).collect();
+    let pick = entries
+        .iter()
+        .find_map(|e| e.split_once('=').filter(|(k, _)| k.eq_ignore_ascii_case(scheme)).map(|(_, v)| v))
+        .or_else(|| entries.iter().copied().find(|e| !e.contains('=')));
+    match pick.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(v) if v.contains("://") => ProxyChoice::Named(v.to_string()),
+        Some(v) => ProxyChoice::Named(format!("http://{v}")),
+        // 이 프로토콜용 프록시가 없다(예: http= 만 적힘): 직접 연결.
+        None => ProxyChoice::Direct,
+    }
+}
+
+/// ProxyOverride 목록("*.corp;10.*;<local>")에 맞는 호스트인가.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn bypass_matches(host: &str, bypass: &str) -> bool {
+    bypass.split([';', ' ', '\t']).map(str::trim).filter(|p| !p.is_empty()).any(|pattern| {
+        let pattern = pattern.to_ascii_lowercase();
+        if pattern == "<local>" {
+            !host.contains('.')
+        } else {
+            wildcard_match(&pattern, host)
+        }
+    })
+}
+
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let (p, t): (Vec<char>, Vec<char>) = (pattern.chars().collect(), text.chars().collect());
+    let (mut pi, mut ti, mut star, mut mark) = (0, 0, None, 0);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|&c| c == '*')
 }
 
 /// WinHTTP 프록시 목록("a:8080; b:8080", "https=a:443")에서 첫 프록시를 reqwest 주소로.
@@ -445,8 +514,13 @@ fn clean_download_dir(dir: &Path, keep: Option<&Path>) {
 pub async fn check<R: Runtime>(app: &AppHandle<R>, manual: bool) -> UpdateStatus {
     let updater = updater(app);
     let _guard = if manual {
-        // 진행 중인 확인(받기 포함)이 있으면 끝나기를 기다렸다가 새로 확인한다.
-        updater.check_lock.lock().await
+        match updater.check_lock.try_lock() {
+            Ok(guard) => guard,
+            // 새 버전을 받는 중이면 기다리지 않고 "받는 중"을 알린다. 다 받으면 이벤트로 알린다.
+            Err(_) if updater.status().state == UpdateState::Downloading => return updater.status(),
+            // 릴리스 정보를 읽는 중이면 곧 끝나므로 기다렸다가 새로 확인한다.
+            Err(_) => updater.check_lock.lock().await,
+        }
     } else {
         let recent = {
             let inner = updater.inner.lock().unwrap();
@@ -521,7 +595,7 @@ async fn check_inner(updater: &Updater) -> Result<(), String> {
     }
 
     std::fs::create_dir_all(&updater.download_dir).map_err(|e| e.to_string())?;
-    let target = updater.download_dir.join(&entry.setup_name);
+    let target = updater.download_dir.join(UPDATE_FILE);
     clean_download_dir(&updater.download_dir, Some(&target));
     if file_sha256(&target).as_deref() != Some(entry.sha256.as_str()) {
         let bytes = fetch(&updater.current, &setup_url(&entry)).await?;
@@ -576,11 +650,55 @@ fn system_shutting_down() -> bool {
     false
 }
 
+/// rhwpp 설치 파일(install.ps1 이 받은 rhwpp_x_x64-setup.exe)이나 NSIS 제거 프로그램이 실행 중인가.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn is_installer_process(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    (name.starts_with("rhwpp_") && name.ends_with("-setup.exe"))
+        || matches!(name.as_str(), "uninstall.exe" | "un_a.exe" | "au_.exe")
+}
+
+#[cfg(windows)]
+fn other_installer_running() -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    };
+    // SAFETY: 스냅숏 핸들은 끝에서 닫고, PROCESSENTRY32W 는 dwSize 를 채운 뒤 넘긴다.
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return false;
+        }
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut found = false;
+        let mut ok = Process32FirstW(snapshot, &mut entry) != 0;
+        while ok && !found {
+            let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+            found = is_installer_process(&String::from_utf16_lossy(&entry.szExeFile[..len]));
+            ok = Process32NextW(snapshot, &mut entry) != 0;
+        }
+        CloseHandle(snapshot);
+        found
+    }
+}
+
+#[cfg(not(windows))]
+fn other_installer_running() -> bool {
+    false
+}
+
 /// 사용자가 프로그램을 끝낼 때(모든 창이 닫힌 뒤) 받아 둔 업데이트를 설치한다.
 pub fn on_exit<R: Runtime>(app: &AppHandle<R>) {
     let updater = updater(app);
     // 끝나는 세션이나 다른 설치 프로그램과 겹쳐 설치하다 끊기면 실행 파일이 망가진다.
     if !updater.exit_requested.load(Ordering::SeqCst) || system_shutting_down() {
+        return;
+    }
+    // 사용자가 rhwpp 설치·제거 프로그램의 안내를 받고 창을 닫은 경우: 그 프로그램과 겹치지 않게
+    // 이번에는 설치하지 않는다(다음에 끝낼 때 설치한다).
+    if other_installer_running() {
         return;
     }
     let inner = updater.inner.lock().unwrap();
@@ -702,10 +820,15 @@ pub fn update_status(app: AppHandle) -> UpdateStatus {
 /// 사용자가 고른 "업데이트 확인".
 #[tauri::command]
 pub async fn update_check(app: AppHandle) -> UpdateStatus {
-    let status = check(&app, true).await;
-    // 수동으로 확인한 결과는 그 자리에서 보여 주므로 같은 알림을 다시 띄우지 않는다.
+    let mut status = check(&app, true).await;
+    // 수동으로 확인한 결과는 그 자리에서 보여 주므로 같은 알림을 다시 띄우지 않는다. 이미 띄운
+    // 알림(예: 확인하는 동안 받기가 끝나 뜬 알림)이면 화면에 다시 크게 띄우지 않게 알려 준다.
     if let Some(latest) = status.latest.as_ref().and_then(|v| Version::parse(v).ok()) {
-        updater(&app).inner.lock().unwrap().notified = Some((latest, status.state));
+        let key = (latest, status.state);
+        let updater = updater(&app);
+        let mut inner = updater.inner.lock().unwrap();
+        status.already_notified = inner.notified.as_ref() == Some(&key);
+        inner.notified = Some(key);
     }
     status
 }
@@ -810,6 +933,31 @@ ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789 *rhwpp_0.2.0_x6
         inner.state = Some(UpdateState::Ready);
         assert!(inner.take_notice(), "'새 버전 있음' 뒤에 '받았음'은 다시 알린다");
         assert!(!inner.take_notice());
+    }
+
+    #[test]
+    fn manual_proxy_settings() {
+        let gh = "https://github.com/woo202/rhwpp/releases/latest/download/SHA256SUMS.txt";
+        assert_eq!(manual_proxy_for(gh, "proxy:8080", ""), ProxyChoice::Named("http://proxy:8080".into()));
+        assert_eq!(
+            manual_proxy_for(gh, "http=p1:80;https=p2:443", ""),
+            ProxyChoice::Named("http://p2:443".into())
+        );
+        assert_eq!(manual_proxy_for("http://x.org/a", "http=p1:80;https=p2:443", ""), ProxyChoice::Named("http://p1:80".into()));
+        assert_eq!(manual_proxy_for(gh, "http=p1:80", ""), ProxyChoice::Direct);
+        assert_eq!(manual_proxy_for(gh, "proxy:8080", "*.github.com;github.com"), ProxyChoice::Direct);
+        assert_eq!(manual_proxy_for(gh, "proxy:8080", "*.corp;<local>"), ProxyChoice::Named("http://proxy:8080".into()));
+        assert_eq!(manual_proxy_for("http://intranet/x", "proxy:8080", "<local>"), ProxyChoice::Direct);
+        assert!(wildcard_match("10.*", "10.1.2.3") && !wildcard_match("10.*", "110.1.2.3"));
+    }
+
+    #[test]
+    fn recognises_other_installers() {
+        assert!(is_installer_process("rhwpp_0.2.0_x64-setup.exe"));
+        assert!(is_installer_process("Un_A.exe"));
+        assert!(is_installer_process("uninstall.exe"));
+        assert!(!is_installer_process(UPDATE_FILE), "자기 자신의 업데이트 파일은 아니다");
+        assert!(!is_installer_process("rhwpp.exe"));
     }
 
     #[test]
