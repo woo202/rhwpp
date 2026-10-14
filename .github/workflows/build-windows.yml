@@ -1,0 +1,354 @@
+name: Windows 빌드
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'package.json 버전으로 v<버전> 태그를 만들고 릴리스를 게시한다'
+        type: boolean
+        default: false
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Windows x64 설치 파일
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: 저장소 받기
+        uses: actions/checkout@v4
+
+      - name: 태그와 앱 버전 확인 (릴리스)
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)
+        shell: pwsh
+        run: |
+          # install.ps1 은 설치 파일 이름의 버전으로 v<버전> 릴리스를 찾는다.
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            if ($env:GITHUB_REF_NAME -ne "v$version") { throw "태그 $env:GITHUB_REF_NAME 가 package.json 버전 v$version 과 다릅니다" }
+          } else {
+            # 수동 실행: 게시한 릴리스는 고칠 수 없으므로 이미 있는 태그는 미리 막는다.
+            git ls-remote --exit-code --tags origin "refs/tags/v$version" *> $null
+            if ($LASTEXITCODE -eq 0) { throw "태그 v$version 이 이미 있습니다. package.json 버전을 올리세요" }
+            $global:LASTEXITCODE = 0
+          }
+
+      - name: Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Rust (앱 셸)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: wasm-pack 0.15.0
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.15.0
+
+      - name: npm 의존성
+        run: npm ci
+
+      - name: 업스트림 rhwp 받기 (upstream.json 고정 커밋, sparse checkout)
+        run: npm run upstream:fetch
+
+      - name: Rust 빌드 캐시
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            upstream/rhwp -> target
+            src-tauri -> target
+          key: ${{ hashFiles('upstream.json') }}
+          cache-on-failure: true
+
+      - name: 문서 엔진 WASM 빌드 (업스트림 rust-toolchain.toml 사용)
+        run: npm run build:wasm
+
+      - name: 프런트엔드 빌드 (업스트림 스튜디오 의존성 설치 포함)
+        run: npm run build:web
+
+      - name: 타입 검사
+        run: npm run typecheck
+
+      - name: 오버레이 단위 테스트
+        run: npm test
+
+      - name: 앱 셸 단위 테스트
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: 설치 파일 빌드 (NSIS + MSI)
+        run: npx tauri build
+
+      - name: 실행 확인 (문서를 연 채로 동작 + 화면 캡처)
+        shell: pwsh
+        run: |
+          $doc = Resolve-Path upstream/rhwp/saved/blank2010.hwp
+          $p = Start-Process -FilePath src-tauri/target/release/rhwpp.exe -ArgumentList "`"$doc`"" -PassThru
+          # 처음 켜는 러너는 WebView2·WASM 준비가 느리다. 제목에 문서 이름이 뜰 때까지 기다리고(최대 60초),
+          # 그 뒤 10초 더 지켜보며 빈 새 문서가 시작 문서를 밀어내지 않는지 본다.
+          $title = ''
+          $seen = $null
+          for ($i = 0; $i -lt 60 -and -not $seen; $i++) {
+            Start-Sleep -Seconds 1
+            if ($p.HasExited) { throw "rhwpp.exe 가 시작 직후 종료되었습니다 (exit $($p.ExitCode))" }
+            $title = (Get-Process -Id $p.Id).MainWindowTitle
+            if ($title.Contains('blank2010.hwp')) { $seen = $i + 1 }
+          }
+          if ($seen) {
+            Write-Host "문서가 열리기까지 약 ${seen}초"
+            Start-Sleep -Seconds 10
+            if ($p.HasExited) { throw "rhwpp.exe 가 문서를 연 뒤 종료되었습니다 (exit $($p.ExitCode))" }
+            $title = (Get-Process -Id $p.Id).MainWindowTitle
+          }
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+          $bmp.Save("$PWD/smoke-screenshot.png")
+          Write-Host "창 제목: $title"
+          Stop-Process -Id $p.Id -Force
+          if (-not $title.Contains('blank2010.hwp')) { throw "문서가 열리지 않았습니다 (창 제목: $title)" }
+
+      - name: 스모크 테스트 화면 올리기
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-screenshot
+          path: smoke-screenshot.png
+          if-no-files-found: ignore
+
+      - name: 한 줄 설치 스크립트 확인 (실제 설치 파일로 설치·업데이트·이전·제거·MSI)
+        shell: pwsh
+        run: |
+          $rel = Join-Path $env:RUNNER_TEMP 'release'
+          New-Item -ItemType Directory -Force -Path $rel | Out-Null
+          Copy-Item src-tauri/target/release/bundle/nsis/*-setup.exe, install.ps1 $rel
+          Get-ChildItem $rel -File | ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name } |
+            Set-Content (Join-Path $rel 'SHA256SUMS.txt') -Encoding ascii
+          $server = Start-Process python -ArgumentList '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', $rel -PassThru -WindowStyle Hidden
+          $userKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\rhwpp'
+          $machineKey = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\rhwpp'
+          function Get-InstalledExe([string]$Key) {
+            if (-not (Test-Path $Key)) { return $null }
+            Join-Path ((Get-ItemProperty $Key).InstallLocation.Trim('"')) 'rhwpp.exe'
+          }
+          function Get-MsiEntry {
+            Get-ChildItem 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall' |
+              Get-ItemProperty -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'rhwpp' -and $_.UninstallString -match 'msiexec' }
+          }
+          try {
+            Start-Sleep -Seconds 3
+            $url = 'http://127.0.0.1:8765'
+
+            # 1. Windows PowerShell 5.1 (다른 PC 기본값)로 새로 설치: 현재 사용자용
+            powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -ReleaseUrl $url
+            if ($LASTEXITCODE -ne 0) { throw "설치 실패 (exit $LASTEXITCODE)" }
+            $userExe = Get-InstalledExe $userKey
+            if (-not $userExe -or -not (Test-Path $userExe)) { throw "현재 사용자 설치를 찾지 못했습니다 ($userExe)" }
+            Write-Host "현재 사용자 설치: $userExe"
+
+            # 2. README 와 같은 irm 경로(5.1). 같은 버전이면 건너뛴다
+            $out = powershell -NoProfile -Command "& ([scriptblock]::Create((irm $url/install.ps1))) -ReleaseUrl $url" | Out-String
+            Write-Host $out
+            if ($LASTEXITCODE -ne 0 -or $out -notmatch 'is already installed') { throw 'irm 으로 받은 스크립트가 기존 설치를 알아보지 못했습니다' }
+
+            # 3. PowerShell 7 로 다시 설치(-Force: 바로 가기도 다시 만든다)
+            pwsh -NoProfile -File install.ps1 -ReleaseUrl $url -Force
+            if ($LASTEXITCODE -ne 0) { throw "재설치 실패 (exit $LASTEXITCODE)" }
+            $shortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'rhwpp.lnk'
+            if (-not (Test-Path $shortcut)) { throw "바탕 화면 바로 가기가 없습니다 ($shortcut)" }
+
+            # 3-1. 업데이트(/UPDATE): 예전 버전으로 보이게 한 뒤 다시 실행. 지운 바로 가기는 되살리지 않는다
+            Remove-Item $shortcut
+            Set-ItemProperty $userKey -Name DisplayVersion -Value '0.0.1'
+            powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -ReleaseUrl $url
+            if ($LASTEXITCODE -ne 0) { throw "업데이트 실패 (exit $LASTEXITCODE)" }
+            $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+            if ((Get-ItemProperty $userKey).DisplayVersion -ne $version) { throw '업데이트 뒤 버전이 바뀌지 않았습니다' }
+            if (Test-Path $shortcut) { throw '업데이트가 지운 바탕 화면 바로 가기를 되살렸습니다' }
+
+            # 4. -AllUsers: 현재 사용자 설치를 지우고 모든 사용자용으로 옮긴다
+            powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -ReleaseUrl $url -AllUsers
+            if ($LASTEXITCODE -ne 0) { throw "모든 사용자용 설치 실패 (exit $LASTEXITCODE)" }
+            if (Test-Path $userKey) { throw '현재 사용자 설치가 남아 있습니다' }
+            if (Test-Path $userExe) { throw "$userExe 가 남아 있습니다" }
+            $machineExe = Get-InstalledExe $machineKey
+            if (-not $machineExe -or -not (Test-Path $machineExe)) { throw "모든 사용자용 설치를 찾지 못했습니다 ($machineExe)" }
+            Write-Host "모든 사용자용 설치: $machineExe"
+            # 현재 사용자 제거가 남긴 빈 파일 형식 값이 모든 사용자용 연결을 가리지 않아야 한다
+            foreach ($ext in 'hwp', 'hwpx', 'hml') {
+              $progId = (Get-ItemProperty "Registry::HKEY_CLASSES_ROOT\.$ext").'(default)'
+              if ($progId -ne "rhwpp.$ext") { throw ".$ext 파일 연결이 '$progId' 입니다 (rhwpp.$ext 이어야 함)" }
+              $left = (Get-ItemProperty "HKCU:\Software\Classes\.$ext" -ErrorAction SilentlyContinue).'(default)'
+              if ($null -ne $left) { throw "현재 사용자 .$ext 파일 형식 값 '$left' 이 남아 있습니다" }
+            }
+
+            # 5. 다시 실행하면 모든 사용자용 설치를 알아본다
+            $out = powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -ReleaseUrl $url | Out-String
+            Write-Host $out
+            if ($out -notmatch 'is already installed') { throw '모든 사용자용 설치를 알아보지 못했습니다' }
+
+            # 6. 제거
+            powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Uninstall
+            if ($LASTEXITCODE -ne 0) { throw "제거 실패 (exit $LASTEXITCODE)" }
+            if ((Test-Path $machineKey) -or (Test-Path $machineExe)) { throw '제거 뒤에도 모든 사용자용 설치가 남아 있습니다' }
+
+            # 7. MSI 로 설치돼 있으면 한 줄 설치는 멈추고, -Uninstall 은 MSI 도 지운다
+            $msi = (Get-ChildItem src-tauri/target/release/bundle/msi/*.msi | Select-Object -First 1).FullName
+            $p = Start-Process msiexec.exe -ArgumentList '/i', "`"$msi`"", '/qn', '/norestart' -Wait -PassThru
+            if ($p.ExitCode -ne 0) { throw "MSI 설치 실패 (exit $($p.ExitCode))" }
+            if (-not (Get-MsiEntry)) { throw 'MSI 설치 정보를 찾지 못했습니다' }
+            $out = powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -ReleaseUrl $url | Out-String
+            Write-Host $out
+            if ($LASTEXITCODE -eq 0 -or $out -notmatch 'MSI package') { throw 'MSI 설치를 알아보지 못했습니다' }
+            powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Uninstall
+            if ($LASTEXITCODE -ne 0) { throw "MSI 제거 실패 (exit $LASTEXITCODE)" }
+            if (Get-MsiEntry) { throw 'MSI 설치가 남아 있습니다' }
+          } finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: 자동 업데이트 확인 (설치된 앱이 새 버전을 받아 두었다가 끝낼 때 설치)
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1).FullName
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $userKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\rhwpp'
+          function New-Release([string]$Dir, [string]$Name) {
+            New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+            Copy-Item $setup (Join-Path $Dir $Name)
+            Copy-Item install.ps1 $Dir
+            Get-ChildItem $Dir -File | Where-Object Name -ne 'SHA256SUMS.txt' |
+              ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name } |
+              Set-Content (Join-Path $Dir 'SHA256SUMS.txt') -Encoding ascii
+          }
+          # 지금 버전과, 같은 설치 파일을 '다음 버전(99.0.0)' 이름으로 내놓은 가짜 릴리스
+          $now = Join-Path $env:RUNNER_TEMP 'release-now'
+          $next = Join-Path $env:RUNNER_TEMP 'release-next'
+          New-Release $now (Split-Path -Leaf $setup)
+          New-Release $next 'rhwpp_99.0.0_x64-setup.exe'
+          $servers = @(
+            Start-Process python -ArgumentList '-m', 'http.server', '8767', '--bind', '127.0.0.1', '--directory', $now -PassThru -WindowStyle Hidden
+            Start-Process python -ArgumentList '-m', 'http.server', '8768', '--bind', '127.0.0.1', '--directory', $next -PassThru -WindowStyle Hidden
+          )
+          try {
+            Start-Sleep -Seconds 3
+            powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -ReleaseUrl http://127.0.0.1:8767
+            if ($LASTEXITCODE -ne 0) { throw "설치 실패 (exit $LASTEXITCODE)" }
+            $exe = Join-Path ((Get-ItemProperty $userKey).InstallLocation.Trim('"')) 'rhwpp.exe'
+            # 설치 파일이 다시 실행됐는지 알 수 있게 표시해 둔다(업데이트가 0.1.0 으로 되돌려 쓴다)
+            Set-ItemProperty $userKey -Name DisplayVersion -Value '0.0.1'
+
+            $env:RHWPP_UPDATE_URL = 'http://127.0.0.1:8768'
+            $env:RHWPP_UPDATE_DELAY_SECS = '2'
+            $app = Start-Process $exe -PassThru
+            Remove-Item Env:RHWPP_UPDATE_URL, Env:RHWPP_UPDATE_DELAY_SECS
+
+            $downloaded = Join-Path $env:LOCALAPPDATA 'io.github.woo202.rhwpp\updates\rhwpp-update-setup.exe'
+            for ($i = 0; $i -lt 90 -and -not (Test-Path $downloaded); $i++) { Start-Sleep -Seconds 1 }
+            if (-not (Test-Path $downloaded)) { throw "앱이 새 버전을 받지 않았습니다 ($downloaded)" }
+            if ((Get-FileHash $downloaded -Algorithm SHA256).Hash -ne (Get-FileHash $setup -Algorithm SHA256).Hash) { throw '받은 설치 파일이 다릅니다' }
+            Write-Host "새 버전을 받는 데 약 ${i}초"
+            Start-Sleep -Seconds 2
+
+            # 창을 닫아 정상 종료 → 끝날 때 설치
+            $null = $app.CloseMainWindow()
+            if (-not $app.WaitForExit(30000)) { throw 'rhwpp 가 창을 닫아도 끝나지 않았습니다' }
+            for ($i = 0; $i -lt 120 -and (Get-ItemProperty $userKey).DisplayVersion -ne $version; $i++) { Start-Sleep -Seconds 1 }
+            if ((Get-ItemProperty $userKey).DisplayVersion -ne $version) { throw '끝낼 때 업데이트가 설치되지 않았습니다' }
+            Write-Host "끝낸 뒤 설치까지 약 ${i}초"
+            Start-Sleep -Seconds 5
+            if (Get-Process rhwpp -ErrorAction SilentlyContinue) { throw '끝낼 때 설치한 뒤에는 다시 실행되면 안 됩니다' }
+
+            powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Uninstall
+            if ($LASTEXITCODE -ne 0) { throw "제거 실패 (exit $LASTEXITCODE)" }
+          } finally {
+            Get-Process rhwpp -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            $servers | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+          }
+
+      - name: 휴대용 실행 파일 묶기
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path portable | Out-Null
+          Copy-Item src-tauri/target/release/rhwpp.exe portable/
+          Compress-Archive -Path portable/* -DestinationPath rhwpp-portable-x64.zip -Force
+
+      - name: 산출물 올리기
+        uses: actions/upload-artifact@v4
+        with:
+          name: rhwpp-windows-x64
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+            rhwpp-portable-x64.zip
+          if-no-files-found: error
+
+  release:
+    name: 릴리스 게시
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: rhwpp-windows-x64
+          path: artifact
+      - name: 릴리스 파일 모으기 (설치 스크립트 + SHA256SUMS.txt)
+        run: |
+          mkdir release
+          find artifact -type f -exec cp -t release {} +
+          cp install.ps1 release/
+          cd release
+          sha256sum -- * > ../SHA256SUMS.txt
+          mv ../SHA256SUMS.txt .
+          cat SHA256SUMS.txt
+      - name: 릴리스 이름(태그) 정하기
+        id: tag
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "name=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=v$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+          fi
+      # 게시한 릴리스는 파일을 더할 수 없다(immutable). 초안으로 만들어 파일을 모두 올린 뒤 게시한다.
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          target_commitish: ${{ github.sha }}
+          draft: true
+          files: release/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+      - name: 릴리스 게시
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          count=$(gh release view "$TAG" --json assets --jq '.assets | length')
+          expected=$(ls release | wc -l)
+          if [ "$count" -ne "$expected" ]; then
+            echo "초안에 파일이 $count 개뿐입니다(기대 $expected 개). 게시하지 않습니다." >&2
+            exit 1
+          fi
+          gh release edit "$TAG" --draft=false --latest

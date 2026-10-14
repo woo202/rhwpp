@@ -1,0 +1,472 @@
+/* ==========================================================================
+   rhwpp — 한글 2022 식 데스크톱 스킨
+   업스트림 스튜디오의 "클래식" 스킨 위에 덧입힌다. 모던/올드스쿨 스킨이나 어두운 화면을
+   고르면 그 스킨의 토큰을 따르고, 제목 표시줄·탭 메뉴 같은 데스크톱 요소만 유지한다.
+   ========================================================================== */
+
+/* ── 1. 색상 토큰 (밝은 화면 + 클래식 스킨일 때) ─────────────────────────── */
+html.rhwpp[data-rhwpp-skin="hangul"]:not([data-theme-skin]):not([data-theme-effective="dark"]) {
+  --ui-bg: #f3f3f3;
+  --ui-bg-light: #ffffff;
+  --ui-surface: #ffffff;
+  --ui-surface-raised: #fbfbfb;
+  --ui-surface-muted: #ececec;
+  --ui-border: #c6c6c6;
+  --ui-border-light: #dadada;
+  --ui-border-subtle: #e3e3e3;
+  --ui-border-strong: #b0b0b0;
+  --ui-text: #262626;
+  --ui-text-secondary: #4a4a4a;
+  --ui-hover: #e8eef9;
+  --ui-hover-strong: #e3ebf8;
+  --ui-active: #cddcf3;
+  --ui-selected: #dce8fa;
+  --ui-menu-open: #2a64c5;
+  --ui-menu-open-border: #2a64c5;
+  --ui-toolbar-bg-start: #ffffff;
+  --ui-toolbar-bg-end: #f9f9f9;
+  --ui-accent-bg: #e3ebf8;
+  --ui-accent-bg-light: #eef3fb;
+  --accent-primary: #2a64c5;
+  --accent-strong: #1e4f9e;
+  --accent-light: #3d7be0;
+  --accent-hover: #9fbbe8;
+  --accent-subtle: #6f97d9;
+  --focus-ring: #3d7be0;
+  --doc-workspace: #dcdde0;
+  --doc-shadow: rgba(0, 0, 0, 0.28);
+  --ruler-bg: #e4e4e4;
+  --ruler-body: #ffffff;
+  --ruler-tick: #6a6a6a;
+  --ruler-text: #3c3c3c;
+  --ruler-marker: #2a64c5;
+  --rhwpp-titlebar-bg: #ffffff;
+  --rhwpp-titlebar-text: #262626;
+  --rhwpp-tab-active: #2a64c5;
+}
+
+/* 데스크톱 요소 공통 토큰(모든 스킨/테마) */
+html.rhwpp {
+  --rhwpp-titlebar-height: 32px;
+  --rhwpp-titlebar-bg: var(--ui-bg-light);
+  --rhwpp-titlebar-text: var(--ui-text);
+  --rhwpp-tab-active: var(--accent-primary);
+  --rhwpp-caption-hover: rgba(0, 0, 0, 0.07);
+  --rhwpp-caption-press: rgba(0, 0, 0, 0.12);
+  --rhwpp-close-hover: #c42b1c;
+}
+
+html.rhwpp[data-theme-effective="dark"] {
+  --rhwpp-caption-hover: rgba(255, 255, 255, 0.08);
+  --rhwpp-caption-press: rgba(255, 255, 255, 0.14);
+}
+
+html.rhwpp body {
+  overflow: hidden;
+  user-select: none;
+}
+
+/* 데스크톱 앱에서는 창 테두리가 없으므로 최대화가 아닐 때 얇은 외곽선을 그린다. */
+html.rhwpp-desktop:not(.rhwpp-maximized) #studio-root {
+  box-shadow: inset 0 0 0 1px var(--ui-border-strong);
+}
+
+/* ── 2. 제목 표시줄 ─────────────────────────────────────────────────────── */
+#rhwpp-titlebar {
+  display: flex;
+  align-items: center;
+  flex: 0 0 var(--rhwpp-titlebar-height);
+  height: var(--rhwpp-titlebar-height);
+  padding-left: 8px;
+  background: var(--rhwpp-titlebar-bg);
+  color: var(--rhwpp-titlebar-text);
+  border-bottom: 1px solid var(--ui-border-subtle);
+  font-family: var(--font-family-ui);
+  font-size: 12px;
+  position: relative;
+  z-index: 30;
+}
+
+html.rhwpp-window-inactive #rhwpp-titlebar {
+  color: var(--ui-text-hint);
+}
+
+.rhwpp-app-icon {
+  width: 18px;
+  height: 18px;
+  margin-right: 6px;
+  flex: 0 0 auto;
+  pointer-events: none;
+}
+
+.rhwpp-qat {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding-right: 8px;
+  margin-right: 4px;
+  border-right: 1px solid var(--ui-border-subtle);
+}
+
+.rhwpp-qat-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.rhwpp-qat-btn:hover:not(:disabled) {
+  background: var(--ui-hover-strong);
+  border-color: var(--ui-border-light);
+}
+
+.rhwpp-qat-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.rhwpp-qat-btn .tb-sprite,
+.rhwpp-qat-btn .rhwpp-icon {
+  width: 16px;
+  height: 16px;
+  pointer-events: none;
+}
+
+.rhwpp-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-align: center;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  padding: 0 12px;
+  line-height: var(--rhwpp-titlebar-height);
+  cursor: default;
+}
+
+.rhwpp-title-path {
+  color: var(--ui-text-muted);
+}
+
+.rhwpp-caption {
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+}
+
+.rhwpp-caption-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: default;
+}
+
+.rhwpp-caption-btn:hover {
+  background: var(--rhwpp-caption-hover);
+}
+
+.rhwpp-caption-btn:active {
+  background: var(--rhwpp-caption-press);
+}
+
+.rhwpp-caption-help {
+  width: 36px;
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--accent-primary);
+}
+
+.rhwpp-caption-close:hover {
+  background: var(--rhwpp-close-hover);
+  color: #ffffff;
+}
+
+.rhwpp-caption-close:active {
+  background: #b22a1d;
+  color: #ffffff;
+}
+
+/* 브라우저 미리보기(개발용): 창 단추가 없다. */
+html.rhwpp-browser-preview #rhwpp-titlebar {
+}
+
+/* ── 3. 탭 메뉴 (메뉴 이름 = 리본 탭, ▾ = 열림 상자) ────────────────────── */
+html.rhwpp #menu-bar {
+  height: 30px;
+  padding: 0 6px;
+  background: var(--rhwpp-titlebar-bg);
+  border-bottom: 1px solid var(--ui-border-subtle);
+}
+
+html.rhwpp .menu-item.rhwpp-tab {
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+}
+
+html.rhwpp .menu-item.rhwpp-tab > .menu-title {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  padding: 0 4px 0 11px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  line-height: 1;
+  font-size: 13px;
+}
+
+html.rhwpp .menu-item.rhwpp-tab > .menu-title:hover {
+  background: var(--ui-hover);
+  color: var(--accent-strong);
+}
+
+html.rhwpp .rhwpp-tab-arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 100%;
+  margin-right: 3px;
+  border-bottom: 2px solid transparent;
+  color: var(--ui-text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+
+html.rhwpp .rhwpp-tab-arrow:hover {
+  background: var(--ui-hover);
+  color: var(--accent-strong);
+}
+
+html.rhwpp .menu-item.rhwpp-tab-active > .menu-title,
+html.rhwpp .menu-item.rhwpp-tab-active > .rhwpp-tab-arrow {
+  color: var(--rhwpp-tab-active);
+  border-bottom-color: var(--rhwpp-tab-active);
+  font-weight: 700;
+}
+
+html.rhwpp .menu-item.rhwpp-tab-active > .rhwpp-tab-arrow {
+  font-weight: 400;
+}
+
+html.rhwpp .menu-item.open > .menu-title,
+html.rhwpp .menu-item.open > .rhwpp-tab-arrow {
+  background: var(--ui-menu-open);
+  border-bottom-color: var(--ui-menu-open);
+  color: var(--ui-text-on-accent);
+}
+
+html.rhwpp .menu-dropdown {
+  top: 100%;
+}
+
+/* ── 4. 리본(기본 도구 상자) ────────────────────────────────────────────── */
+html.rhwpp #icon-toolbar {
+  background: linear-gradient(var(--ui-toolbar-bg-start), var(--ui-toolbar-bg-end));
+  border-bottom: 1px solid var(--ui-border-subtle);
+}
+
+/* 탭별 리본 전환: 다른 탭의 그룹을 숨긴다. */
+.tb-scroll-track[data-rhwpp-ribbon="edit"] > [data-ribbon]:not([data-ribbon="edit"]),
+.tb-scroll-track[data-rhwpp-ribbon="file"] > :not([data-ribbon="file"]),
+.tb-scroll-track[data-rhwpp-ribbon="view"] > :not([data-ribbon="view"]),
+.tb-scroll-track[data-rhwpp-ribbon="insert"] > :not([data-ribbon="insert"]),
+.tb-scroll-track[data-rhwpp-ribbon="format"] > :not([data-ribbon="format"]),
+.tb-scroll-track[data-rhwpp-ribbon="page"] > :not([data-ribbon="page"]),
+.tb-scroll-track[data-rhwpp-ribbon="table"] > :not([data-ribbon="table"]),
+.tb-scroll-track[data-rhwpp-ribbon="tool"] > :not([data-ribbon="tool"]) {
+  display: none !important;
+}
+
+.rhwpp-tb-btn .tb-svg {
+  display: block;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.rhwpp-tb-btn .tb-svg .rhwpp-icon {
+  display: block;
+}
+
+.rhwpp-tb-btn .tb-label {
+  white-space: nowrap;
+}
+
+.rhwpp-tb-btn.disabled,
+.rhwpp-tb-btn:disabled {
+  opacity: 0.38;
+}
+
+.rhwpp-tb-btn.disabled:hover {
+  background: transparent;
+  border-color: transparent;
+}
+
+html[data-theme-effective="dark"] .rhwpp-icon {
+  filter: brightness(1.15) saturate(0.9);
+}
+
+/* ── 5. 서식 도구 상자 / 상태 표시줄 ────────────────────────────────────── */
+html.rhwpp[data-rhwpp-skin="hangul"]:not([data-theme-skin]):not([data-theme-effective="dark"]) #style-bar {
+  background: #ffffff;
+  border-bottom: 1px solid var(--ui-border-light);
+}
+
+html.rhwpp[data-rhwpp-skin="hangul"]:not([data-theme-skin]):not([data-theme-effective="dark"]) #status-bar {
+  background: #f3f3f3;
+  border-top: 1px solid var(--ui-border-light);
+  color: #3c3c3c;
+}
+
+/* ── 6. 글꼴 ───────────────────────────────────────────────────────────── */
+html.rhwpp {
+  --font-family-ui: '맑은 고딕', 'Malgun Gothic', 'Segoe UI', 'Apple SD Gothic Neo', sans-serif;
+}
+
+/* ── 7. 대화상자 ───────────────────────────────────────────────────────── */
+.rhwpp-about {
+  padding: 16px 20px 8px;
+  line-height: 1.6;
+  user-select: text;
+}
+
+.rhwpp-about-lead {
+  margin: 0 0 12px;
+}
+
+.rhwpp-about table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 12px;
+}
+
+.rhwpp-about th {
+  width: 84px;
+  padding: 3px 8px 3px 0;
+  text-align: left;
+  font-weight: 600;
+  color: var(--ui-text-secondary);
+  vertical-align: top;
+}
+
+.rhwpp-about td {
+  padding: 3px 0;
+  word-break: break-all;
+}
+
+.rhwpp-about-note {
+  margin: 0;
+  font-size: 11px;
+  color: var(--ui-text-muted);
+}
+
+/* 입력 칸·문서 텍스트는 선택 가능해야 한다. */
+html.rhwpp input,
+html.rhwpp textarea,
+html.rhwpp [contenteditable="true"],
+html.rhwpp .dialog-body {
+  user-select: text;
+}
+
+/* ── 8. 문서 탭 (상태 표시줄 위) ────────────────────────────────────────── */
+#rhwpp-doc-tabs {
+  display: flex;
+  align-items: flex-end;
+  flex: 0 0 26px;
+  height: 26px;
+  padding: 0 6px;
+  background: var(--ui-bg);
+  border-top: 1px solid var(--ui-border-light);
+  font-size: 12px;
+  overflow: hidden;
+}
+
+.rhwpp-doc-tab-list {
+  display: flex;
+  align-items: flex-end;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.rhwpp-doc-tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 220px;
+  height: 22px;
+  padding: 0 4px 0 10px;
+  margin-right: 2px;
+  border: 1px solid var(--ui-border-light);
+  border-top: 0;
+  border-radius: 0 0 4px 4px;
+  background: var(--ui-surface-muted);
+  color: var(--ui-text-secondary);
+  cursor: default;
+}
+
+.rhwpp-doc-tab:hover {
+  background: var(--ui-hover);
+}
+
+.rhwpp-doc-tab.active {
+  height: 24px;
+  margin-top: -1px;
+  background: var(--ui-surface);
+  color: var(--ui-text);
+  font-weight: 600;
+  border-color: var(--ui-border);
+  box-shadow: inset 0 -2px 0 var(--rhwpp-tab-active);
+}
+
+.rhwpp-doc-tab-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.rhwpp-doc-tab-close,
+.rhwpp-doc-tab-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--ui-text-muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.rhwpp-doc-tab-close:hover {
+  background: var(--rhwpp-close-hover);
+  color: #ffffff;
+}
+
+.rhwpp-doc-tab-add {
+  align-self: center;
+  margin-left: 2px;
+  font-size: 16px;
+}
+
+.rhwpp-doc-tab-add:hover {
+  background: var(--ui-hover-strong);
+  color: var(--accent-strong);
+}

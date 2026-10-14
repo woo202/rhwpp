@@ -1,0 +1,7 @@
+{
+  "$comment": "rhwpp가 감싸는 업스트림 rhwp 커밋. `npm run upstream:update`로 최신 main에 동기화한다.",
+  "repo": "https://github.com/edwardkim/rhwp",
+  "branch": "main",
+  "commit": "1a76570e833917d15817415a53c09ad61ab3203f",
+  "version": "0.8.7"
+}

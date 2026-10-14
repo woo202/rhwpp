@@ -1,0 +1,15 @@
+# 의존성·산출물
+node_modules/
+dist/
+/upstream/
+src-tauri/target/
+src-tauri/gen/
+portable/
+*.zip
+
+# 편집기·OS
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/

@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["chrome"],
+    "typeRoots": ["../node_modules/@types", "../upstream/rhwp/rhwp-studio/node_modules/@types"],
+    "paths": {
+      "@/*": ["../upstream/rhwp/rhwp-studio/src/*"],
+      "@wasm/*": ["../upstream/rhwp/pkg/*"],
+      "@rhwp/hwpctrl/studio-plugin": ["../upstream/rhwp/rhwp-studio/types/rhwp-hwpctrl-plugin.d.ts"]
+    }
+  },
+  "include": ["src", "env.d.ts", "../upstream/rhwp/rhwp-studio/src/vite-env.d.ts"]
+}

@@ -1,0 +1,42 @@
+[package]
+name = "rhwpp"
+version = "0.1.1"
+description = "rhwp 기반 Windows용 HWP/HWPX 워드프로세서"
+authors = ["rhwpp contributors"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.90"
+
+[lib]
+name = "rhwpp_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+tauri = { version = "2.12", features = [] }
+tauri-plugin-dialog = "2.8"
+tauri-plugin-opener = "2.7"
+tauri-plugin-single-instance = "2.5"
+tauri-plugin-window-state = "2.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+percent-encoding = "2"
+tokio = { version = "1", features = ["time", "sync"] }
+# 자동 업데이트: 릴리스 확인·설치 파일 받기(Windows 는 schannel TLS). 수동 프록시는 reqwest 가,
+# 자동 프록시(PAC·자동 검색)는 updater.rs 가 WinHTTP 로 풀어 넘긴다.
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "system-proxy"] }
+semver = "1"
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Networking_WinHttp", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
