@@ -1,6 +1,6 @@
 [package]
 name = "rhwpp"
-version = "0.1.0"
+version = "0.1.1"
 description = "rhwp 기반 Windows용 HWP/HWPX 워드프로세서"
 authors = ["rhwpp contributors"]
 license = "MIT"
